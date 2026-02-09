@@ -2,7 +2,399 @@
 //  MangaReaderView.swift
 //  Manga-reader
 //
-//  Created by Aki Toyoshima on 2026/01/31.
+//  Created by Aki Toyoshima on 2026/02/09.
 //
 
 import Foundation
+import SwiftUI
+import AppKit
+
+// Check if this Enum is already in MangaGrid.swift.
+// If it is, delete this block to avoid "Invalid Redeclaration" errors.
+enum ReadingDirection: String, CaseIterable, Identifiable {
+    case rightToLeft = "Right to Left (Manga)"
+    case leftToRight = "Left to Right (Comic)"
+    case vertical = "Vertical (Webtoon)"
+    var id: String { self.rawValue }
+}
+
+struct MangaReaderView: View {
+    let volumeURL: URL
+    @Bindable var manga: MangaSeries
+    
+    // --- STATE ---
+    @State private var currentIndex = 0
+    @FocusState private var isFocused: Bool
+    @State private var pages: [URL] = []
+    
+    // --- VIEW OPTIONS ---
+    @AppStorage("readingDirection") private var readingDirection: ReadingDirection = .rightToLeft
+    @AppStorage("isTwoPageMode") private var isTwoPageMode = false
+    @AppStorage("useCoverOffset") private var useCoverOffset = true // <--- NEW: Defaults to ON
+
+    // --- BODY ---
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                Color.black.ignoresSafeArea()
+                
+                // 1. CALCULATE LAYOUT
+                let layout = calculateLayout(for: currentIndex, in: pages)
+                
+                // --- LAYER 1: THE PAGES ---
+                ZStack {
+                    if isTwoPageMode {
+                        // --- DOUBLE PAGE MODE ---
+                        if let centerPage = layout.center {
+                            // Wide Spread OR Cover Page (Always centered)
+                            PageView(url: centerPage, size: geo.size, alignment: .center)
+                        } else {
+                            // Standard Spread
+                            HStack(spacing: 0) {
+                                // RTL (Manga): Next(N+1) goes Left | Current(N) goes Right
+                                // LTR (Comic): Current(N) goes Left | Next(N+1) goes Right
+                                
+                                let leftPage = readingDirection == .rightToLeft ? layout.left : layout.right
+                                let rightPage = readingDirection == .rightToLeft ? layout.right : layout.left
+                                
+                                // Left Slot
+                                if let page = leftPage {
+                                    PageView(url: page,
+                                             size: CGSize(width: geo.size.width / 2, height: geo.size.height),
+                                             alignment: .trailing)
+                                } else {
+                                    Spacer().frame(width: geo.size.width / 2)
+                                }
+                                
+                                // Right Slot
+                                if let page = rightPage {
+                                    PageView(url: page,
+                                             size: CGSize(width: geo.size.width / 2, height: geo.size.height),
+                                             alignment: .leading)
+                                } else {
+                                    Spacer().frame(width: geo.size.width / 2)
+                                }
+                            }
+                        }
+                    } else {
+                        // --- SINGLE PAGE MODE ---
+                        if pages.indices.contains(currentIndex) {
+                            PageView(url: pages[currentIndex], size: geo.size, alignment: .center)
+                        }
+                    }
+                }
+                .frame(width: geo.size.width, height: geo.size.height)
+                
+                // --- LAYER 2: NAVIGATION ZONES (Invisible Click Areas) ---
+                HStack(spacing: 0) {
+                    // LEFT CLICK ZONE
+                    Color.clear.contentShape(Rectangle())
+                        .frame(width: 80)
+                        .onTapGesture {
+                            if readingDirection == .rightToLeft {
+                                navigateNext(step: isTwoPageMode ? layout.step : 1)
+                            } else {
+                                navigatePrevious()
+                            }
+                        }
+                    
+                    Spacer()
+                    
+                    // RIGHT CLICK ZONE
+                    Color.clear.contentShape(Rectangle())
+                        .frame(width: 80)
+                        .onTapGesture {
+                            if readingDirection == .rightToLeft {
+                                navigatePrevious()
+                            } else {
+                                navigateNext(step: isTwoPageMode ? layout.step : 1)
+                            }
+                        }
+                }
+                
+                // --- LAYER 3: MINIMAL PROGRESS BAR (Hugs Bottom) ---
+                VStack {
+                    Spacer()
+                    // The Bar
+                    GeometryReader { barGeo in
+                        ZStack(alignment: .leading) {
+                            // Track (Visible)
+                            Rectangle()
+                                .fill(Color.white.opacity(0.3))
+                            
+                            // Progress
+                            Rectangle()
+                                .fill(Color.accentColor)
+                                .frame(width: barGeo.size.width * (CGFloat(currentIndex + 1) / CGFloat(max(1, pages.count))))
+                        }
+                    }
+                    .frame(height: 3) // Extremely thin
+                }
+                .padding(.bottom, 0) // Hugs the very edge
+            }
+        }
+        // --- MODIFIERS ---
+        .focusable()
+        .focused($isFocused)
+        .onAppear {
+            loadPages()
+            restoreProgress()
+            isFocused = true
+        }
+        .onChange(of: currentIndex) { _, newIndex in
+            saveProgress(page: newIndex)
+        }
+        // KEYBOARD SHORTCUTS
+        .onKeyPress(.leftArrow) {
+            let layout = calculateLayout(for: currentIndex, in: pages)
+            if readingDirection == .rightToLeft {
+                navigateNext(step: isTwoPageMode ? layout.step : 1)
+            } else {
+                navigatePrevious()
+            }
+            return .handled
+        }
+        .onKeyPress(.rightArrow) {
+            let layout = calculateLayout(for: currentIndex, in: pages)
+            if readingDirection == .rightToLeft {
+                navigatePrevious()
+            } else {
+                navigateNext(step: isTwoPageMode ? layout.step : 1)
+            }
+            return .handled
+        }
+        // TITLE & TOOLBAR
+        .navigationTitle(currentTitle)
+        .navigationSubtitle(currentSubtitle)
+        .toolbar {
+            // 1. VIEW MODE TOGGLE
+            ToolbarItem(placement: .primaryAction) {
+                Picker("View Mode", selection: $isTwoPageMode) {
+                    Image(systemName: "rectangle").tag(false)
+                        .help("Single Page View")
+                    Image(systemName: "book").tag(true)
+                        .help("Two Page View")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 100)
+            }
+
+            // 2. OFFSET BUTTON (Manual Override)
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: {
+                    if currentIndex < pages.count - 1 {
+                        currentIndex += 1
+                    }
+                }) {
+                    Label("Offset +1", systemImage: "arrow.forward.square")
+                }
+                .help("Shift page order by one to fix spreads")
+            }
+            
+            // 3. SETTINGS MENU (Direction + Cover Offset)
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Toggle("Show Cover Alone", isOn: $useCoverOffset) // <--- NEW TOGGLE
+                    Divider()
+                    Picker("Direction", selection: $readingDirection) {
+                        Text("Right to Left (Manga)").tag(ReadingDirection.rightToLeft)
+                        Text("Left to Right (Comic)").tag(ReadingDirection.leftToRight)
+                    }
+                } label: {
+                    Label("Options", systemImage: "gear")
+                }
+            }
+            
+            // 4. MARK READ
+            ToolbarItem {
+                Button(action: markAsRead) {
+                    Label("Mark Read", systemImage: isVolumeRead ? "checkmark.circle.fill" : "circle")
+                }
+            }
+        }
+    }
+    
+    // --- HELPER PROPERTIES ---
+    
+    private var currentTitle: String {
+        return "\(manga.title)  ›  \(volumeURL.lastPathComponent)"
+    }
+    
+    private var currentSubtitle: String {
+        guard pages.indices.contains(currentIndex) else { return "" }
+        let filename = pages[currentIndex].lastPathComponent
+        return "\(filename)   (\(currentIndex + 1) / \(pages.count))"
+    }
+    
+    // --- LOGIC & HELPERS ---
+    
+    struct PageLayout {
+        var right: URL? = nil
+        var left: URL? = nil
+        var center: URL? = nil
+        var step: Int = 2
+    }
+    
+    func calculateLayout(for index: Int, in pages: [URL]) -> PageLayout {
+        guard index < pages.count else { return PageLayout(step: 0) }
+        let currentURL = pages[index]
+        
+        // 1. COVER OFFSET LOGIC
+        // If enabled and we are on Index 0, treat it as a single centered page.
+        if useCoverOffset && index == 0 {
+            return PageLayout(center: currentURL, step: 1)
+        }
+        
+        // 2. WIDE PAGE LOGIC
+        if isWide(currentURL) {
+            return PageLayout(center: currentURL, step: 1)
+        }
+        
+        // 3. STANDARD PAIRING
+        let nextIndex = index + 1
+        var leftURL: URL? = nil
+        var step = 1
+        
+        if nextIndex < pages.count {
+            let nextURL = pages[nextIndex]
+            if isWide(nextURL) {
+                // If the next page is wide, don't pair. Show current alone.
+                leftURL = nil
+                step = 1
+            } else {
+                leftURL = nextURL
+                step = 2
+            }
+        }
+        return PageLayout(right: currentURL, left: leftURL, step: step)
+    }
+    
+    func isWide(_ url: URL) -> Bool {
+        guard let imageRep = NSImageRep(contentsOf: url) else { return false }
+        return imageRep.pixelsWide > imageRep.pixelsHigh
+    }
+
+    func loadPages() {
+        let fm = FileManager.default
+        // Note: Security scoping is handled by the parent grid before passing URL
+        
+        guard let items = try? fm.contentsOfDirectory(at: volumeURL, includingPropertiesForKeys: nil) else { return }
+        self.pages = items
+            .filter { ["jpg", "jpeg", "png", "avif", "webp"].contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+    
+    func navigateNext(step: Int) {
+        if currentIndex + step < pages.count {
+            currentIndex += step
+        } else {
+            currentIndex = pages.count - 1
+        }
+    }
+    
+    func navigatePrevious() {
+        if currentIndex == 0 { return }
+        
+        if !isTwoPageMode {
+            currentIndex -= 1
+            return
+        }
+        
+        // SMART NAVIGATION FOR COVER OFFSET
+        // If we are on Page 1 (Index 1) and Offset is ON, going back should hit Page 0 (Cover)
+        if useCoverOffset && currentIndex == 1 {
+            currentIndex = 0
+            return
+        }
+        
+        let prevIndex1 = currentIndex - 1
+        if prevIndex1 >= 0 && isWide(pages[prevIndex1]) {
+            currentIndex -= 1
+            return
+        }
+        currentIndex = max(0, currentIndex - 2)
+    }
+    
+    // --- PROGRESS LOGIC (With 95% Completion Rule) ---
+    
+    func saveProgress(page: Int) {
+        let volName = volumeURL.lastPathComponent
+        let totalPages = pages.count
+        guard totalPages > 0 else { return }
+        
+        // 1. If we hit the last page (100%), Mark Read & Reset
+        if page >= totalPages - 1 {
+            if !manga.readVolumes.contains(volName) {
+                manga.readVolumes.append(volName)
+            }
+            manga.readingProgress.removeValue(forKey: volName)
+            return
+        }
+        
+        // 2. Otherwise, save current page
+        if page > 0 {
+            manga.readingProgress[volName] = page
+        } else {
+            manga.readingProgress.removeValue(forKey: volName)
+        }
+    }
+    
+    func restoreProgress() {
+        let volName = volumeURL.lastPathComponent
+        guard let savedPage = manga.readingProgress[volName] else { return }
+        
+        let totalPages = pages.count
+        guard totalPages > 0 else { return }
+        
+        // 3. THE 95% RULE
+        let percentage = Double(savedPage) / Double(totalPages)
+        
+        if percentage < 0.95 {
+            if savedPage < totalPages {
+                currentIndex = savedPage
+            }
+        } else {
+            manga.readingProgress.removeValue(forKey: volName)
+            currentIndex = 0
+        }
+    }
+    
+    var isVolumeRead: Bool {
+        manga.readVolumes.contains(volumeURL.lastPathComponent)
+    }
+    
+    func markAsRead() {
+        let name = volumeURL.lastPathComponent
+        if isVolumeRead {
+            manga.readVolumes.removeAll { $0 == name }
+        } else {
+            manga.readVolumes.append(name)
+        }
+    }
+}
+
+// --- SUBVIEWS ---
+
+struct PageView: View {
+    let url: URL
+    let size: CGSize
+    let alignment: Alignment
+    
+    var body: some View {
+        AsyncImage(url: url)
+            .aspectRatio(contentMode: .fit)
+            .frame(width: size.width, height: size.height, alignment: alignment)
+            .clipped()
+    }
+}
+
+struct AsyncImage: View {
+    let url: URL
+    var body: some View {
+        if let nsImage = NSImage(contentsOf: url) {
+            Image(nsImage: nsImage).resizable()
+        } else {
+            Color.gray.opacity(0.1)
+        }
+    }
+}
