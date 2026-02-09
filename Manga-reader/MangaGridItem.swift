@@ -8,49 +8,45 @@
 import SwiftUI
 import SwiftData
 
-struct MangaGridItem: View {
-    @Bindable var manga: MangaSeries
+struct MangaGridItem: View, Equatable {
+    let item: MangaDisplayItem
     let isSelected: Bool
     let onSelect: () -> Void
     let onOpen: () -> Void
     
+    static func == (lhs: MangaGridItem, rhs: MangaGridItem) -> Bool {
+        return lhs.item == rhs.item && lhs.isSelected == rhs.isSelected
+    }
+    
     var body: some View {
         VStack {
-            // --- COVER IMAGE ---
-            // Note: AsyncMangaCover must be available (defined in MangaGrid or its own file)
-            AsyncMangaCover(manga: manga)
+            AsyncMangaCover(item: item)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
                         .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
                 )
             
-            // --- TEXT METADATA ---
             VStack(spacing: 2) {
                 HStack(spacing: 4) {
-                    if manga.isFavorite {
-                        Image(systemName: "star.fill")
-                            .foregroundStyle(.yellow)
-                            .font(.caption2)
-                            .transition(.scale)
+                    if item.isFavorite {
+                        Image(systemName: "star.fill").foregroundStyle(.yellow).font(.caption2)
                     }
-                    if manga.tags.contains("To Read") {
-                        Image(systemName: "eyeglasses")
-                            .foregroundStyle(.blue)
-                            .font(.caption2)
+                    if item.hasToReadTag {
+                        Image(systemName: "eyeglasses").foregroundStyle(.blue).font(.caption2)
                     }
-                    Text(manga.title)
+                    Text(item.title)
                         .font(.caption).bold()
                         .lineLimit(1)
                         .background(isSelected ? Color.accentColor.opacity(0.3) : Color.clear)
                         .cornerRadius(4)
                 }
                 
-                Text("\(manga.readVolumes.count) / \(manga.volumeCount) vols")
+                Text("\(item.readCount) / \(item.volumeCount) vols")
                     .font(.caption2)
-                    .foregroundStyle(manga.isFinished ? .green : .secondary)
+                    .foregroundStyle(item.isFinished ? .green : .secondary)
             }
         }
-        .contentShape(Rectangle()) // Makes the whole area clickable
+        .contentShape(Rectangle())
         .onTapGesture(count: 2) { onOpen() }
         .simultaneousGesture(TapGesture().onEnded { onSelect() })
     }
