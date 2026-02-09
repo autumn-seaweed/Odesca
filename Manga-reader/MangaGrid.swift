@@ -10,7 +10,6 @@ import SwiftData
 import AppKit
 
 // --- 1. THE SNAPSHOT (Lightweight Data) ---
-// This is the secret to fixing the lag. It's just simple text/urls, no heavy DB logic.
 struct MangaDisplayItem: Identifiable, Equatable {
     let id: PersistentIdentifier
     let title: String
@@ -20,6 +19,11 @@ struct MangaDisplayItem: Identifiable, Equatable {
     let hasToReadTag: Bool
     let volumeCount: Int
     let readCount: Int
+    
+    // image caching for NAS
+    var cacheID: String {
+        return String(id.hashValue)
+    }
     
     init(manga: MangaSeries) {
         self.id = manga.persistentModelID
@@ -47,6 +51,9 @@ struct MangaGrid: View {
     @Environment(\.modelContext) var modelContext
     @Query var library: [MangaSeries]
     @Binding var navPath: NavigationPath
+    
+    // NAS state
+    @State private var refreshID = UUID()
     
     // States
     @State private var selectedIds = Set<PersistentIdentifier>()
@@ -87,54 +94,15 @@ struct MangaGrid: View {
         filteredLibrary.map { MangaDisplayItem(manga: $0) }
     }
 
+    // --- MAIN BODY (Refactored for Compiler Performance) ---
     var body: some View {
         Group {
             if library.isEmpty {
-                ContentUnavailableView {
-                    Label("No Manga Found", systemImage: "books.vertical")
-                } description: {
-                    Text("Add a folder containing your manga collection to get started.")
-                } actions: {
-                    Button("Add Folder") {
-                        NSApp.sendAction(#selector(NSDocumentController.openDocument(_:)), to: nil, from: nil)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                }
+                emptyLibraryView
             } else if displayItems.isEmpty {
                 ContentUnavailableView.search(text: searchString)
             } else {
-                ScrollView {
-                    LazyVGrid(columns: columns, spacing: 20) {
-                        // Loop over Snapshots, NOT database objects
-                        ForEach(displayItems) { item in
-                            MangaGridItem(
-                                item: item,
-                                isSelected: selectedIds.contains(item.id),
-                                onSelect: { handleSelection(id: item.id) },
-                                onOpen: { openManga(id: item.id) }
-                            )
-                            .equatable() // This stops it from redrawing if data hasn't changed!
-                            .contextMenu {
-                                // We only fetch the "Real" object when you right-click
-                                if let realManga = library.first(where: { $0.persistentModelID == item.id }) {
-                                    contextMenuButtons(for: realManga)
-                                }
-                            }
-                        }
-                    }
-                    .padding()
-                }
-                .focusable()
-                .onKeyPress(.delete) {
-                    let targets = library.filter { selectedIds.contains($0.persistentModelID) }
-                    if !targets.isEmpty { confirmDelete(targets: targets) }
-                    return .handled
-                }
-                .onKeyPress(.return) {
-                    if let firstId = selectedIds.first { openManga(id: firstId); return .handled }
-                    return .ignored
-                }
+                mangaLibraryGrid
             }
         }
         .onTapGesture { selectedIds.removeAll() }
@@ -148,6 +116,57 @@ struct MangaGrid: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("This will delete the files from your disk. This action cannot be undone.")
+        }
+    }
+    
+    // --- SUBVIEWS (Extracted) ---
+    
+    var emptyLibraryView: some View {
+        ContentUnavailableView {
+            Label("No Manga Found", systemImage: "books.vertical")
+        } description: {
+            Text("Add a folder containing your manga collection to get started.")
+        } actions: {
+            Button("Add Folder") {
+                NSApp.sendAction(#selector(NSDocumentController.openDocument(_:)), to: nil, from: nil)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+        }
+    }
+    
+    var mangaLibraryGrid: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 20) {
+                // Loop over Snapshots, NOT database objects
+                ForEach(displayItems) { item in
+                    MangaGridItem(
+                        item: item,
+                        isSelected: selectedIds.contains(item.id),
+                        onSelect: { handleSelection(id: item.id) },
+                        onOpen: { openManga(id: item.id) }
+                    )
+                    .equatable()
+                    // FIX: Unique ID per item + Refresh Signal
+                    .id(item.cacheID + "-" + refreshID.uuidString)
+                    .contextMenu {
+                        if let realManga = library.first(where: { $0.persistentModelID == item.id }) {
+                            contextMenuButtons(for: realManga, item: item)
+                        }
+                    }
+                }
+            }
+            .padding()
+        }
+        .focusable()
+        .onKeyPress(.delete) {
+            let targets = library.filter { selectedIds.contains($0.persistentModelID) }
+            if !targets.isEmpty { confirmDelete(targets: targets) }
+            return .handled
+        }
+        .onKeyPress(.return) {
+            if let firstId = selectedIds.first { openManga(id: firstId); return .handled }
+            return .ignored
         }
     }
     
@@ -167,7 +186,7 @@ struct MangaGrid: View {
         }
     }
     
-    func contextMenuButtons(for manga: MangaSeries) -> some View {
+    func contextMenuButtons(for manga: MangaSeries, item: MangaDisplayItem) -> some View {
         let targets = selectedIds.contains(manga.persistentModelID) ? library.filter { selectedIds.contains($0.persistentModelID) } : [manga]
         
         let allToRead = targets.allSatisfy { $0.tags.contains("To Read") }
@@ -175,16 +194,29 @@ struct MangaGrid: View {
         
         return Group {
             Text("\(targets.count) Selected")
+            
+            // Toggle "To Read"
             if allToRead {
                 Button { batchSetTag("To Read", targets: targets, active: false) } label: { Label("Remove 'To Read'", systemImage: "eyeglasses") }
             } else {
                 Button { batchSetTag("To Read", targets: targets, active: true) } label: { Label("Add 'To Read'", systemImage: "eyeglasses") }
             }
+            
+            // Toggle Favorites
             if allFavorites {
                 Button { batchSetFavorite(targets: targets, active: false) } label: { Label("Unfavorite", systemImage: "star.slash") }
             } else {
                 Button { batchSetFavorite(targets: targets, active: true) } label: { Label("Favorite", systemImage: "star") }
             }
+            
+            // Refresh Button for refreshing covers
+            Divider()
+            Button {
+                forceRefreshCover(for: item)
+            } label: {
+                Label("Refresh Cover", systemImage: "arrow.clockwise")
+            }
+            
             Divider()
             Button { batchMarkRead(targets: targets, read: true) } label: { Label("Mark Read", systemImage: "checkmark.circle") }
             Button { batchMarkRead(targets: targets, read: false) } label: { Label("Mark Unread", systemImage: "circle") }
@@ -241,6 +273,18 @@ struct MangaGrid: View {
         }
     }
     
+    // force cover refresh
+    func forceRefreshCover(for item: MangaDisplayItem) {
+        // 1. Delete from RAM so the app forgets the old image
+        ThumbnailCache.shared.removeObject(forKey: item.folderURL.path as NSString)
+        
+        // 2. Delete from Disk so the app doesn't just reload the old one on restart
+        CoverCache.shared.delete(for: item.cacheID)
+        
+        // 3. Trigger View Update so the grid actually visually refreshes
+        refreshID = UUID()
+    }
+    
     func confirmDelete(targets: [MangaSeries]) {
         itemsToDelete = targets
         showDeleteAlert = true
@@ -267,9 +311,9 @@ struct MangaGrid: View {
     }
 }
 
-// --- 4. ASYNC COVER (Smart Natural Sorting) ---
+// --- 4. ASYNC COVER (Disk + RAM + Network/NAS Optimized) ---
 struct AsyncMangaCover: View {
-    let item: MangaDisplayItem // Changed to accept the snapshot item
+    let item: MangaDisplayItem
     
     @State private var image: NSImage? = nil
     @State private var loadFailed: Bool = false
@@ -280,9 +324,11 @@ struct AsyncMangaCover: View {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
                     .frame(width: 160, height: 220).clipped().cornerRadius(10).shadow(radius: 3)
             } else if loadFailed {
+                // Failure placeholder
                 RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.3)).frame(width: 160, height: 220)
                     .overlay(Image(systemName: "photo.badge.exclamationmark").foregroundStyle(.secondary))
             } else {
+                // Loading placeholder
                 RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.2)).frame(width: 160, height: 220)
             }
         }
@@ -290,31 +336,42 @@ struct AsyncMangaCover: View {
     }
     
     func loadCover() async {
-        let cacheKey = item.folderURL.path as NSString
-        if let cached = ThumbnailCache.shared.object(forKey: cacheKey) { self.image = cached; return }
+        // 1. RAM CACHE (Fastest - Instant)
+        let ramKey = item.folderURL.path as NSString
+        if let cached = ThumbnailCache.shared.object(forKey: ramKey) {
+            self.image = cached
+            return
+        }
         
+        // 2. DISK CACHE (Fast - Survives Restart)
+        if let diskImage = await Task.detached(priority: .userInitiated, operation: {
+            CoverCache.shared.load(for: item.cacheID)
+        }).value {
+            ThumbnailCache.shared.setObject(diskImage, forKey: ramKey)
+            self.image = diskImage
+            return
+        }
+        
+        // 3. GENERATE (Slow - Network/NAS Access)
         let loadedImage = await Task.detached(priority: .background) { () -> NSImage? in
             if Task.isCancelled { return nil }
             let fm = FileManager.default
             
-            // Recursive Cover Finder with NATURAL SORT
+            // Recursive Finder: Looks for the first image it can find
             func findImage(in dir: URL, depth: Int) -> NSImage? {
                 if depth > 2 { return nil }
-                
-                // 1. Get contents
                 guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return nil }
                 
-                // 2. Look for Images (Sorted Naturally: 1, 2, 10)
+                // Images (Naturally Sorted)
                 let images = items.filter { ["jpg", "png", "jpeg", "webp", "avif"].contains($0.pathExtension.lowercased()) }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
                 
-                // 3. Try to load the first valid image
                 if let first = images.first, let source = CGImageSourceCreateWithURL(first as CFURL, nil) {
                     let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 400] as CFDictionary
                     if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts) { return NSImage(cgImage: cg, size: .zero) }
                 }
                 
-                // 4. If no image, check Subfolders (Sorted Naturally: Vol 1, Vol 2, Vol 10)
+                // Subfolders
                 let folders = items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
                 
@@ -326,8 +383,10 @@ struct AsyncMangaCover: View {
             return findImage(in: item.folderURL, depth: 0)
         }.value
         
+        // 4. SAVE RESULT
         if let img = loadedImage {
-            ThumbnailCache.shared.setObject(img, forKey: cacheKey)
+            ThumbnailCache.shared.setObject(img, forKey: ramKey)     // RAM
+            CoverCache.shared.save(image: img, for: item.cacheID)    // Disk
             self.image = img
         } else {
             self.loadFailed = true
