@@ -300,14 +300,25 @@ struct MangaGrid: View {
     }
     
     func performRename(_ manga: MangaSeries, to name: String) {
+        // 1. Basic safety checks
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard name != manga.title else { return }
+
         let fm = FileManager.default
         let oldURL = manga.folderURL
         let newURL = oldURL.deletingLastPathComponent().appendingPathComponent(name)
+        
         do {
             try fm.moveItem(at: oldURL, to: newURL)
             manga.title = name
             manga.folderURL = newURL
-        } catch { print("Rename failed: \(error)") }
+            
+            // 2. Explicitly save so the UI updates immediately
+            try? modelContext.save()
+            print("✅ Renamed to \(name)")
+        } catch {
+            print("❌ Rename failed: \(error)")
+        }
     }
 }
 
@@ -332,7 +343,8 @@ struct AsyncMangaCover: View {
                 RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.2)).frame(width: 160, height: 220)
             }
         }
-        .task(id: item.id) { await loadCover() }
+        // 👇 UPDATE: Use 'item' so cover updates if Title/URL changes
+        .task(id: item) { await loadCover() }
     }
     
     func loadCover() async {
