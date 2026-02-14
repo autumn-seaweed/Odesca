@@ -28,7 +28,7 @@ struct MangaReaderView: View {
     @State private var pages: [URL] = []
     
     // Track if we need to cleanup a temp folder later
-    @State private var tempEpubFolder: URL? = nil
+    @State private var tempArchiveFolder: URL? = nil
     
     // --- VIEW OPTIONS ---
     @AppStorage("readingDirection") private var readingDirection: ReadingDirection = .rightToLeft
@@ -120,8 +120,8 @@ struct MangaReaderView: View {
             isFocused = true
         }
         .onDisappear {
-            // Cleanup Temp Files if we opened an EPUB
-            if let tmp = tempEpubFolder {
+            // Cleanup Temp Files if we opened an Archive
+            if let tmp = tempArchiveFolder {
                 try? FileManager.default.removeItem(at: tmp)
             }
         }
@@ -214,9 +214,9 @@ struct MangaReaderView: View {
     }
 
     func loadPages() {
-        // 👇 CHANGED: Handle EPUB vs Directory
-        if volumeURL.pathExtension.lowercased() == "epub" {
-            loadEpub()
+        let ext = volumeURL.pathExtension.lowercased()
+        if ["epub", "zip", "cbz"].contains(ext) {
+            loadArchive()
         } else {
             loadDirectory(volumeURL)
         }
@@ -230,11 +230,11 @@ struct MangaReaderView: View {
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
     
-    func loadEpub() {
+    func loadArchive() {
         // 1. Create Temp Directory
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        self.tempEpubFolder = tempDir
+        self.tempArchiveFolder = tempDir
         
         do {
             try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -242,6 +242,8 @@ struct MangaReaderView: View {
             // 2. Unzip using macOS native tool
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+            // -q: Quiet
+            // -d: Destination
             process.arguments = ["-q", volumeURL.path, "-d", tempDir.path]
             
             try process.run()
@@ -252,14 +254,17 @@ struct MangaReaderView: View {
                 var foundImages: [URL] = []
                 for case let fileURL as URL in enumerator {
                     if ["jpg", "jpeg", "png", "avif", "webp"].contains(fileURL.pathExtension.lowercased()) {
-                        foundImages.append(fileURL)
+                        // Exclude weird hidden files like __MACOSX/._image.jpg
+                        if !fileURL.path.contains("__MACOSX") && !fileURL.lastPathComponent.hasPrefix(".") {
+                            foundImages.append(fileURL)
+                        }
                     }
                 }
                 // Sort images
                 self.pages = foundImages.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
             }
         } catch {
-            print("Failed to unzip epub: \(error)")
+            print("Failed to unzip archive: \(error)")
         }
     }
     

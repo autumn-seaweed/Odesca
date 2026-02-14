@@ -41,16 +41,15 @@ struct SeriesDetailView: View {
                             folderURL: volumeURL,
                             progress: manga.readingProgress[volumeURL.lastPathComponent]
                         )
-                        // 👇 1. DIM THE COVER (Makes the badge pop)
                         .opacity(isRead ? 0.5 : 1.0)
                         
-                        // 👇 2. GREEN CHECK MARK (Back in the corner)
+                        // Green Check Mark (Top-Right)
                         .overlay(alignment: .topTrailing) {
                             if isRead {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .font(.title) // Slightly larger for visibility
+                                    .font(.title)
                                     .foregroundStyle(.green)
-                                    .background(Circle().fill(.white)) // White backing for contrast
+                                    .background(Circle().fill(.white))
                                     .padding(8)
                                     .shadow(radius: 3)
                             }
@@ -78,7 +77,6 @@ struct SeriesDetailView: View {
                                 .font(.headline).lineLimit(1)
                                 .background(selectedVolume == volumeURL ? Color.accentColor.opacity(0.3) : Color.clear)
                                 .cornerRadius(4)
-                                // Optional: Grey out text if read
                                 .foregroundStyle(isRead ? .secondary : .primary)
                             
                             Spacer()
@@ -122,14 +120,16 @@ struct SeriesDetailView: View {
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(at: manga.folderURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
         
+        let archiveExts = ["epub", "zip", "cbz"]
+        
         self.volumes = items.filter { item in
             let name = item.lastPathComponent
             if name.hasPrefix(".") { return false }
             
             let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            let isEpub = item.pathExtension.lowercased() == "epub"
+            let isArchive = archiveExts.contains(item.pathExtension.lowercased())
             
-            return isDir || isEpub
+            return isDir || isArchive
         }
         .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
@@ -167,7 +167,7 @@ struct SeriesDetailView: View {
     }
 }
 
-// --- UPDATED VOLUME COVER (Handles Folders + EPUBs) ---
+// --- UPDATED VOLUME COVER (Handles Folders + Archives) ---
 struct VolumeCover: View {
     let folderURL: URL
     let progress: Int?
@@ -185,9 +185,10 @@ struct VolumeCover: View {
             } else if loadFailed {
                 RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.3)).frame(width: 150, height: 220)
                     .overlay(VStack {
-                        Image(systemName: folderURL.pathExtension == "epub" ? "doc.richtext" : "folder.badge.questionmark")
+                        // Dynamic Icon based on type
+                        Image(systemName: isArchive ? "doc.zipper" : "folder")
                             .font(.largeTitle).foregroundStyle(.secondary.opacity(0.5))
-                        Text(folderURL.pathExtension == "epub" ? "EPUB" : "No Cover")
+                        Text(folderURL.pathExtension.uppercased().isEmpty ? "FOLDER" : folderURL.pathExtension.uppercased())
                             .font(.caption2).foregroundStyle(.secondary)
                     })
             } else {
@@ -209,6 +210,10 @@ struct VolumeCover: View {
         .onAppear { loadCover() }
     }
     
+    var isArchive: Bool {
+        ["epub", "zip", "cbz"].contains(folderURL.pathExtension.lowercased())
+    }
+    
     func loadCover() {
         let cacheKey = folderURL.path as NSString
         let cachedImage = ThumbnailCache.shared.object(forKey: cacheKey)
@@ -222,8 +227,8 @@ struct VolumeCover: View {
         if let img = cachedImage { self.image = img }
         
         DispatchQueue.global(qos: .userInitiated).async {
-            if self.folderURL.pathExtension.lowercased() == "epub" {
-                self.loadEpubCover(key: cacheKey)
+            if self.isArchive {
+                self.loadArchiveCover(key: cacheKey)
             } else {
                 self.loadFolderCover(key: cacheKey)
             }
@@ -258,15 +263,17 @@ struct VolumeCover: View {
         }
     }
     
-    func loadEpubCover(key: NSString) {
+    func loadArchiveCover(key: NSString) {
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         
         do {
             try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            
+            // Native Unzip: -j flattens directories (ignoring subfolders), which helps find covers easily
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            process.arguments = ["-q", "-j", folderURL.path, "*.jpg", "*.jpeg", "*.png", "-d", tempDir.path]
+            process.arguments = ["-q", "-j", folderURL.path, "*.jpg", "*.jpeg", "*.png", "*.webp", "-d", tempDir.path]
             try process.run()
             process.waitUntilExit()
             
