@@ -110,14 +110,17 @@ struct SeriesDetailView: View {
     
     func loadVolumes() {
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: manga.folderURL, includingPropertiesForKeys: nil) else { return }
+        // 👇 UPDATED: Added .skipsHiddenFiles option
+        guard let items = try? fm.contentsOfDirectory(at: manga.folderURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
         
-        // 👇 CHANGED: Include Directories OR .epub files
         self.volumes = items.filter { item in
+            let name = item.lastPathComponent
+            if name.hasPrefix(".") { return false } // Explicitly ignore .Panels
+            
             let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             let isEpub = item.pathExtension.lowercased() == "epub"
-            let isHidden = item.lastPathComponent.hasPrefix(".")
-            return !isHidden && (isDir || isEpub)
+            
+            return isDir || isEpub
         }
         .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
@@ -155,7 +158,7 @@ struct SeriesDetailView: View {
     }
 }
 
-// --- UPDATED VOLUME COVER (Handles Folders + EPUBs) ---
+// --- UPDATED VOLUME COVER ---
 struct VolumeCover: View {
     let folderURL: URL
     let progress: Int?
@@ -173,7 +176,6 @@ struct VolumeCover: View {
             } else if loadFailed {
                 RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.3)).frame(width: 150, height: 220)
                     .overlay(VStack {
-                        // Different icon for EPUB vs Folder
                         Image(systemName: folderURL.pathExtension == "epub" ? "doc.richtext" : "folder.badge.questionmark")
                             .font(.largeTitle).foregroundStyle(.secondary.opacity(0.5))
                         Text(folderURL.pathExtension == "epub" ? "EPUB" : "No Cover")
@@ -211,7 +213,6 @@ struct VolumeCover: View {
         if let img = cachedImage { self.image = img }
         
         DispatchQueue.global(qos: .userInitiated).async {
-            // 👇 LOGIC SPLIT: EPUB vs FOLDER
             if self.folderURL.pathExtension.lowercased() == "epub" {
                 self.loadEpubCover(key: cacheKey)
             } else {
@@ -249,19 +250,14 @@ struct VolumeCover: View {
     }
     
     func loadEpubCover(key: NSString) {
-        // Quick extraction of just the first few files to find a cover
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         
         do {
             try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
-            
-            // Native Unzip
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            // Unzip ONLY jpg/png files, and only the first few if possible
             process.arguments = ["-q", "-j", folderURL.path, "*.jpg", "*.jpeg", "*.png", "-d", tempDir.path]
-            
             try process.run()
             process.waitUntilExit()
             
@@ -269,15 +265,13 @@ struct VolumeCover: View {
             let images = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             
             DispatchQueue.main.async {
-                self.totalPages = max(100, images.count) // Approximate page count
-                if let first = images.first,
-                   let img = NSImage(contentsOf: first) {
+                self.totalPages = max(100, images.count)
+                if let first = images.first, let img = NSImage(contentsOf: first) {
                     ThumbnailCache.shared.setObject(img, forKey: key)
                     self.image = img
                 } else {
                     self.loadFailed = true
                 }
-                // Cleanup
                 try? fm.removeItem(at: tempDir)
             }
         } catch {

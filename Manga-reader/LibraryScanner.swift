@@ -53,7 +53,8 @@ class LibraryScanner: ObservableObject {
         
         let fm = FileManager.default
         do {
-            let items = try fm.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil)
+            // Options: Skips Hidden Files automatically handles .DS_Store, etc.
+            let items = try fm.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
             let subfolders = items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
             
             let existingMap = Dictionary(uniqueKeysWithValues: existingManga.map { ($0.folderURL.path, $0) })
@@ -62,26 +63,46 @@ class LibraryScanner: ObservableObject {
                 let folderPath = folder.path
                 let folderName = folder.lastPathComponent
                 
+                // Extra safety check for hidden folders that might slip through
+                if folderName.hasPrefix(".") { continue }
+                
                 let attr = try? fm.attributesOfItem(atPath: folderPath)
                 let modDate = attr?[.modificationDate] as? Date ?? Date()
                 
                 // Get contents of the Series folder
-                let volItems = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+                let volItems = (try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
                 
-                // 👇 CHANGED: Count Folders OR .epub files as "Volumes"
-                let volCount = volItems.filter { item in
+                // 1. Identify Valid Volumes (Filter out .Panels, etc)
+                let validVolumes = volItems.filter { item in
+                    let name = item.lastPathComponent
+                    if name.hasPrefix(".") { return false } // Explicitly ignore .Panels, .DS_Store
+                    
                     let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
                     let isEpub = item.pathExtension.lowercased() == "epub"
-                    let isHidden = item.lastPathComponent.hasPrefix(".")
-                    return !isHidden && (isDir || isEpub)
-                }.count
+                    
+                    return isDir || isEpub
+                }
+                
+                let volCount = validVolumes.count
+                // Create a set of valid names for cleanup
+                let validNamesSet = Set(validVolumes.map { $0.lastPathComponent })
                 
                 if let existing = existingMap[folderPath] {
+                    // Update Metadata
                     if existing.volumeCount != volCount || existing.dateModified != modDate {
                         existing.volumeCount = volCount
                         existing.dateModified = modDate
                         print("🔄 Updated: \(folderName)")
                     }
+                    
+                    // 👇 NEW: Sanitize Read History
+                    // Removes "Ghost" volumes (like .Panels) that were previously marked read but are now ignored
+                    let cleanedReadVolumes = existing.readVolumes.filter { validNamesSet.contains($0) }
+                    if cleanedReadVolumes.count != existing.readVolumes.count {
+                        existing.readVolumes = cleanedReadVolumes
+                        print("🧹 Cleaned up read history for \(folderName)")
+                    }
+                    
                 } else {
                     let newManga = MangaSeries(title: folderName, folderURL: folder)
                     newManga.dateModified = modDate
