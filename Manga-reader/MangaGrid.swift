@@ -159,6 +159,7 @@ struct MangaGrid: View {
             .padding()
         }
         .focusable()
+        .focusEffectDisabled() // 👈 NEW: Disables the blue "halo" ring around the window
         .onKeyPress(.delete) {
             let targets = library.filter { selectedIds.contains($0.persistentModelID) }
             if !targets.isEmpty { confirmDelete(targets: targets) }
