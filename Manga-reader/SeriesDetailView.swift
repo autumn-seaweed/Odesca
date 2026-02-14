@@ -34,25 +34,32 @@ struct SeriesDetailView: View {
             
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 20) {
                 ForEach(volumes, id: \.self) { volumeURL in
+                    let isRead = manga.readVolumes.contains(volumeURL.lastPathComponent)
+                    
                     VStack {
                         VolumeCover(
                             folderURL: volumeURL,
                             progress: manga.readingProgress[volumeURL.lastPathComponent]
                         )
+                        // 👇 1. DIM THE COVER (Makes the badge pop)
+                        .opacity(isRead ? 0.5 : 1.0)
+                        
+                        // 👇 2. GREEN CHECK MARK (Back in the corner)
+                        .overlay(alignment: .topTrailing) {
+                            if isRead {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.title) // Slightly larger for visibility
+                                    .foregroundStyle(.green)
+                                    .background(Circle().fill(.white)) // White backing for contrast
+                                    .padding(8)
+                                    .shadow(radius: 3)
+                            }
+                        }
+                        // Selection Border
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
                                 .stroke(Color.accentColor, lineWidth: selectedVolume == volumeURL ? 3 : 0)
                         )
-                        .overlay(alignment: .topTrailing) {
-                            if manga.readVolumes.contains(volumeURL.lastPathComponent) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(.green)
-                                    .background(Circle().fill(.white))
-                                    .font(.title2)
-                                    .padding(5)
-                                    .shadow(radius: 2)
-                            }
-                        }
                         .contentShape(Rectangle())
                         .onTapGesture(count: 2) { openVolume(volumeURL) }
                         .onTapGesture(count: 1) { selectedVolume = volumeURL }
@@ -71,12 +78,15 @@ struct SeriesDetailView: View {
                                 .font(.headline).lineLimit(1)
                                 .background(selectedVolume == volumeURL ? Color.accentColor.opacity(0.3) : Color.clear)
                                 .cornerRadius(4)
+                                // Optional: Grey out text if read
+                                .foregroundStyle(isRead ? .secondary : .primary)
+                            
                             Spacer()
+                            
                             Button {
-                                let isRead = manga.readVolumes.contains(volumeURL.lastPathComponent)
                                 toggleReadStatus(for: volumeURL, setRead: !isRead)
                             } label: {
-                                Image(systemName: manga.readVolumes.contains(volumeURL.lastPathComponent) ? "eye.slash" : "eye")
+                                Image(systemName: isRead ? "eye.slash" : "eye")
                                     .foregroundStyle(.secondary)
                             }
                             .buttonStyle(.plain)
@@ -110,12 +120,11 @@ struct SeriesDetailView: View {
     
     func loadVolumes() {
         let fm = FileManager.default
-        // 👇 UPDATED: Added .skipsHiddenFiles option
         guard let items = try? fm.contentsOfDirectory(at: manga.folderURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
         
         self.volumes = items.filter { item in
             let name = item.lastPathComponent
-            if name.hasPrefix(".") { return false } // Explicitly ignore .Panels
+            if name.hasPrefix(".") { return false }
             
             let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             let isEpub = item.pathExtension.lowercased() == "epub"
@@ -158,7 +167,7 @@ struct SeriesDetailView: View {
     }
 }
 
-// --- UPDATED VOLUME COVER ---
+// --- UPDATED VOLUME COVER (Handles Folders + EPUBs) ---
 struct VolumeCover: View {
     let folderURL: URL
     let progress: Int?
