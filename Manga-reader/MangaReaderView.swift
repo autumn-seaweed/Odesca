@@ -30,7 +30,7 @@ struct MangaReaderView: View {
     // --- VIEW OPTIONS ---
     @AppStorage("readingDirection") private var readingDirection: ReadingDirection = .rightToLeft
     @AppStorage("isTwoPageMode") private var isTwoPageMode = false
-    @AppStorage("useCoverOffset") private var useCoverOffset = true // <--- NEW: Defaults to ON
+    @AppStorage("useCoverOffset") private var useCoverOffset = true
 
     // --- BODY ---
     var body: some View {
@@ -51,9 +51,6 @@ struct MangaReaderView: View {
                         } else {
                             // Standard Spread
                             HStack(spacing: 0) {
-                                // RTL (Manga): Next(N+1) goes Left | Current(N) goes Right
-                                // LTR (Comic): Current(N) goes Left | Next(N+1) goes Right
-                                
                                 let leftPage = readingDirection == .rightToLeft ? layout.left : layout.right
                                 let rightPage = readingDirection == .rightToLeft ? layout.right : layout.left
                                 
@@ -136,6 +133,7 @@ struct MangaReaderView: View {
         // --- MODIFIERS ---
         .focusable()
         .focused($isFocused)
+        .focusEffectDisabled() // 👈 NEW: Removes the "Halo" around the window while reading
         .onAppear {
             loadPages()
             restoreProgress()
@@ -194,7 +192,7 @@ struct MangaReaderView: View {
             // 3. SETTINGS MENU (Direction + Cover Offset)
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Toggle("Show Cover Alone", isOn: $useCoverOffset) // <--- NEW TOGGLE
+                    Toggle("Show Cover Alone", isOn: $useCoverOffset)
                     Divider()
                     Picker("Direction", selection: $readingDirection) {
                         Text("Right to Left (Manga)").tag(ReadingDirection.rightToLeft)
@@ -240,7 +238,6 @@ struct MangaReaderView: View {
         let currentURL = pages[index]
         
         // 1. COVER OFFSET LOGIC
-        // If enabled and we are on Index 0, treat it as a single centered page.
         if useCoverOffset && index == 0 {
             return PageLayout(center: currentURL, step: 1)
         }
@@ -258,7 +255,6 @@ struct MangaReaderView: View {
         if nextIndex < pages.count {
             let nextURL = pages[nextIndex]
             if isWide(nextURL) {
-                // If the next page is wide, don't pair. Show current alone.
                 leftURL = nil
                 step = 1
             } else {
@@ -276,8 +272,6 @@ struct MangaReaderView: View {
 
     func loadPages() {
         let fm = FileManager.default
-        // Note: Security scoping is handled by the parent grid before passing URL
-        
         guard let items = try? fm.contentsOfDirectory(at: volumeURL, includingPropertiesForKeys: nil) else { return }
         self.pages = items
             .filter { ["jpg", "jpeg", "png", "avif", "webp"].contains($0.pathExtension.lowercased()) }
@@ -294,19 +288,14 @@ struct MangaReaderView: View {
     
     func navigatePrevious() {
         if currentIndex == 0 { return }
-        
         if !isTwoPageMode {
             currentIndex -= 1
             return
         }
-        
-        // SMART NAVIGATION FOR COVER OFFSET
-        // If we are on Page 1 (Index 1) and Offset is ON, going back should hit Page 0 (Cover)
         if useCoverOffset && currentIndex == 1 {
             currentIndex = 0
             return
         }
-        
         let prevIndex1 = currentIndex - 1
         if prevIndex1 >= 0 && isWide(pages[prevIndex1]) {
             currentIndex -= 1

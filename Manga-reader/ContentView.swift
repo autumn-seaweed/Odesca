@@ -51,28 +51,22 @@ struct ContentView: View {
                 .background(.ultraThinMaterial)
                 
                 // --- MAIN CONTENT ---
-                ScrollView {
-                    // Pass the NavPath Binding to the grid so it can "Push" views
-                    MangaGrid(sort: sortOrder, searchString: searchText, filter: currentFilter, navPath: $navPath)
-                        .padding(.top, 10)
-                }
+                // 👇 FIXED: Removed 'ScrollView { ... }' wrapper.
+                // MangaGrid already has its own ScrollView.
+                MangaGrid(sort: sortOrder, searchString: searchText, filter: currentFilter, navPath: $navPath)
+                    .padding(.top, 10)
             }
             .navigationTitle("Library")
-            // ... inside NavigationStack ...
-
-                // 1. Handle opening a Series (receives ID)
-                .navigationDestination(for: PersistentIdentifier.self) { id in
-                    if let manga = modelContext.model(for: id) as? MangaSeries {
-                        SeriesDetailView(manga: manga, navPath: $navPath)
-                    }
+            .navigationDestination(for: PersistentIdentifier.self) { id in
+                if let manga = modelContext.model(for: id) as? MangaSeries {
+                    SeriesDetailView(manga: manga, navPath: $navPath)
                 }
-                
-                // 2. Handle opening a Volume (receives struct with ID)
-                .navigationDestination(for: VolumeDestination.self) { dest in
-                    if let manga = modelContext.model(for: dest.mangaID) as? MangaSeries {
-                        MangaReaderView(volumeURL: dest.volumeURL, manga: manga)
-                    }
+            }
+            .navigationDestination(for: VolumeDestination.self) { dest in
+                if let manga = modelContext.model(for: dest.mangaID) as? MangaSeries {
+                    MangaReaderView(volumeURL: dest.volumeURL, manga: manga)
                 }
+            }
             .searchable(text: $searchText, prompt: "Search manga...")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
