@@ -27,6 +27,9 @@ struct MangaReaderView: View {
     @FocusState private var isFocused: Bool
     @State private var pages: [URL] = []
     
+    // Track if we need to cleanup a temp folder later
+    @State private var tempEpubFolder: URL? = nil
+    
     // --- VIEW OPTIONS ---
     @AppStorage("readingDirection") private var readingDirection: ReadingDirection = .rightToLeft
     @AppStorage("isTwoPageMode") private var isTwoPageMode = false
@@ -46,15 +49,12 @@ struct MangaReaderView: View {
                     if isTwoPageMode {
                         // --- DOUBLE PAGE MODE ---
                         if let centerPage = layout.center {
-                            // Wide Spread OR Cover Page (Always centered)
                             PageView(url: centerPage, size: geo.size, alignment: .center)
                         } else {
-                            // Standard Spread
                             HStack(spacing: 0) {
                                 let leftPage = readingDirection == .rightToLeft ? layout.left : layout.right
                                 let rightPage = readingDirection == .rightToLeft ? layout.right : layout.left
                                 
-                                // Left Slot
                                 if let page = leftPage {
                                     PageView(url: page,
                                              size: CGSize(width: geo.size.width / 2, height: geo.size.height),
@@ -63,7 +63,6 @@ struct MangaReaderView: View {
                                     Spacer().frame(width: geo.size.width / 2)
                                 }
                                 
-                                // Right Slot
                                 if let page = rightPage {
                                     PageView(url: page,
                                              size: CGSize(width: geo.size.width / 2, height: geo.size.height),
@@ -82,114 +81,80 @@ struct MangaReaderView: View {
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
                 
-                // --- LAYER 2: NAVIGATION ZONES (Invisible Click Areas) ---
+                // --- LAYER 2: NAVIGATION ZONES ---
                 HStack(spacing: 0) {
-                    // LEFT CLICK ZONE
-                    Color.clear.contentShape(Rectangle())
-                        .frame(width: 80)
+                    Color.clear.contentShape(Rectangle()).frame(width: 80)
                         .onTapGesture {
-                            if readingDirection == .rightToLeft {
-                                navigateNext(step: isTwoPageMode ? layout.step : 1)
-                            } else {
-                                navigatePrevious()
-                            }
+                            if readingDirection == .rightToLeft { navigateNext(step: isTwoPageMode ? layout.step : 1) }
+                            else { navigatePrevious() }
                         }
-                    
                     Spacer()
-                    
-                    // RIGHT CLICK ZONE
-                    Color.clear.contentShape(Rectangle())
-                        .frame(width: 80)
+                    Color.clear.contentShape(Rectangle()).frame(width: 80)
                         .onTapGesture {
-                            if readingDirection == .rightToLeft {
-                                navigatePrevious()
-                            } else {
-                                navigateNext(step: isTwoPageMode ? layout.step : 1)
-                            }
+                            if readingDirection == .rightToLeft { navigatePrevious() }
+                            else { navigateNext(step: isTwoPageMode ? layout.step : 1) }
                         }
                 }
                 
-                // --- LAYER 3: MINIMAL PROGRESS BAR (Hugs Bottom) ---
+                // --- LAYER 3: PROGRESS BAR ---
                 VStack {
                     Spacer()
-                    // The Bar
                     GeometryReader { barGeo in
                         ZStack(alignment: .leading) {
-                            // Track (Visible)
-                            Rectangle()
-                                .fill(Color.white.opacity(0.3))
-                            
-                            // Progress
-                            Rectangle()
-                                .fill(Color.accentColor)
+                            Rectangle().fill(Color.white.opacity(0.3))
+                            Rectangle().fill(Color.accentColor)
                                 .frame(width: barGeo.size.width * (CGFloat(currentIndex + 1) / CGFloat(max(1, pages.count))))
                         }
                     }
-                    .frame(height: 3) // Extremely thin
+                    .frame(height: 3)
                 }
-                .padding(.bottom, 0) // Hugs the very edge
+                .padding(.bottom, 0)
             }
         }
-        // --- MODIFIERS ---
         .focusable()
         .focused($isFocused)
-        .focusEffectDisabled() // 👈 NEW: Removes the "Halo" around the window while reading
+        .focusEffectDisabled()
         .onAppear {
             loadPages()
             restoreProgress()
             isFocused = true
         }
+        .onDisappear {
+            // Cleanup Temp Files if we opened an EPUB
+            if let tmp = tempEpubFolder {
+                try? FileManager.default.removeItem(at: tmp)
+            }
+        }
         .onChange(of: currentIndex) { _, newIndex in
             saveProgress(page: newIndex)
         }
-        // KEYBOARD SHORTCUTS
         .onKeyPress(.leftArrow) {
             let layout = calculateLayout(for: currentIndex, in: pages)
-            if readingDirection == .rightToLeft {
-                navigateNext(step: isTwoPageMode ? layout.step : 1)
-            } else {
-                navigatePrevious()
-            }
+            if readingDirection == .rightToLeft { navigateNext(step: isTwoPageMode ? layout.step : 1) }
+            else { navigatePrevious() }
             return .handled
         }
         .onKeyPress(.rightArrow) {
             let layout = calculateLayout(for: currentIndex, in: pages)
-            if readingDirection == .rightToLeft {
-                navigatePrevious()
-            } else {
-                navigateNext(step: isTwoPageMode ? layout.step : 1)
-            }
+            if readingDirection == .rightToLeft { navigatePrevious() }
+            else { navigateNext(step: isTwoPageMode ? layout.step : 1) }
             return .handled
         }
-        // TITLE & TOOLBAR
         .navigationTitle(currentTitle)
         .navigationSubtitle(currentSubtitle)
         .toolbar {
-            // 1. VIEW MODE TOGGLE
             ToolbarItem(placement: .primaryAction) {
                 Picker("View Mode", selection: $isTwoPageMode) {
-                    Image(systemName: "rectangle").tag(false)
-                        .help("Single Page View")
-                    Image(systemName: "book").tag(true)
-                        .help("Two Page View")
+                    Image(systemName: "rectangle").tag(false).help("Single Page View")
+                    Image(systemName: "book").tag(true).help("Two Page View")
                 }
-                .pickerStyle(.segmented)
-                .frame(width: 100)
+                .pickerStyle(.segmented).frame(width: 100)
             }
-
-            // 2. OFFSET BUTTON (Manual Override)
             ToolbarItem(placement: .primaryAction) {
-                Button(action: {
-                    if currentIndex < pages.count - 1 {
-                        currentIndex += 1
-                    }
-                }) {
+                Button(action: { if currentIndex < pages.count - 1 { currentIndex += 1 } }) {
                     Label("Offset +1", systemImage: "arrow.forward.square")
                 }
-                .help("Shift page order by one to fix spreads")
             }
-            
-            // 3. SETTINGS MENU (Direction + Cover Offset)
             ToolbarItem(placement: .primaryAction) {
                 Menu {
                     Toggle("Show Cover Alone", isOn: $useCoverOffset)
@@ -198,12 +163,8 @@ struct MangaReaderView: View {
                         Text("Right to Left (Manga)").tag(ReadingDirection.rightToLeft)
                         Text("Left to Right (Comic)").tag(ReadingDirection.leftToRight)
                     }
-                } label: {
-                    Label("Options", systemImage: "gear")
-                }
+                } label: { Label("Options", systemImage: "gear") }
             }
-            
-            // 4. MARK READ
             ToolbarItem {
                 Button(action: markAsRead) {
                     Label("Mark Read", systemImage: isVolumeRead ? "checkmark.circle.fill" : "circle")
@@ -214,17 +175,13 @@ struct MangaReaderView: View {
     
     // --- HELPER PROPERTIES ---
     
-    private var currentTitle: String {
-        return "\(manga.title)  ›  \(volumeURL.lastPathComponent)"
-    }
-    
+    private var currentTitle: String { "\(manga.title)  ›  \(volumeURL.lastPathComponent)" }
     private var currentSubtitle: String {
         guard pages.indices.contains(currentIndex) else { return "" }
-        let filename = pages[currentIndex].lastPathComponent
-        return "\(filename)   (\(currentIndex + 1) / \(pages.count))"
+        return "\(pages[currentIndex].lastPathComponent)   (\(currentIndex + 1) / \(pages.count))"
     }
     
-    // --- LOGIC & HELPERS ---
+    // --- LOGIC ---
     
     struct PageLayout {
         var right: URL? = nil
@@ -236,31 +193,17 @@ struct MangaReaderView: View {
     func calculateLayout(for index: Int, in pages: [URL]) -> PageLayout {
         guard index < pages.count else { return PageLayout(step: 0) }
         let currentURL = pages[index]
+        if useCoverOffset && index == 0 { return PageLayout(center: currentURL, step: 1) }
+        if isWide(currentURL) { return PageLayout(center: currentURL, step: 1) }
         
-        // 1. COVER OFFSET LOGIC
-        if useCoverOffset && index == 0 {
-            return PageLayout(center: currentURL, step: 1)
-        }
-        
-        // 2. WIDE PAGE LOGIC
-        if isWide(currentURL) {
-            return PageLayout(center: currentURL, step: 1)
-        }
-        
-        // 3. STANDARD PAIRING
         let nextIndex = index + 1
         var leftURL: URL? = nil
         var step = 1
         
         if nextIndex < pages.count {
             let nextURL = pages[nextIndex]
-            if isWide(nextURL) {
-                leftURL = nil
-                step = 1
-            } else {
-                leftURL = nextURL
-                step = 2
-            }
+            if isWide(nextURL) { leftURL = nil; step = 1 }
+            else { leftURL = nextURL; step = 2 }
         }
         return PageLayout(right: currentURL, left: leftURL, step: step)
     }
@@ -271,61 +214,84 @@ struct MangaReaderView: View {
     }
 
     func loadPages() {
+        // 👇 CHANGED: Handle EPUB vs Directory
+        if volumeURL.pathExtension.lowercased() == "epub" {
+            loadEpub()
+        } else {
+            loadDirectory(volumeURL)
+        }
+    }
+    
+    func loadDirectory(_ dir: URL) {
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: volumeURL, includingPropertiesForKeys: nil) else { return }
+        guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
         self.pages = items
             .filter { ["jpg", "jpeg", "png", "avif", "webp"].contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
     
-    func navigateNext(step: Int) {
-        if currentIndex + step < pages.count {
-            currentIndex += step
-        } else {
-            currentIndex = pages.count - 1
+    func loadEpub() {
+        // 1. Create Temp Directory
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        self.tempEpubFolder = tempDir
+        
+        do {
+            try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            
+            // 2. Unzip using macOS native tool
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+            process.arguments = ["-q", volumeURL.path, "-d", tempDir.path]
+            
+            try process.run()
+            process.waitUntilExit()
+            
+            // 3. Find Images recursively
+            if let enumerator = fm.enumerator(at: tempDir, includingPropertiesForKeys: nil) {
+                var foundImages: [URL] = []
+                for case let fileURL as URL in enumerator {
+                    if ["jpg", "jpeg", "png", "avif", "webp"].contains(fileURL.pathExtension.lowercased()) {
+                        foundImages.append(fileURL)
+                    }
+                }
+                // Sort images
+                self.pages = foundImages.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            }
+        } catch {
+            print("Failed to unzip epub: \(error)")
         }
+    }
+    
+    func navigateNext(step: Int) {
+        if currentIndex + step < pages.count { currentIndex += step }
+        else { currentIndex = pages.count - 1 }
     }
     
     func navigatePrevious() {
         if currentIndex == 0 { return }
-        if !isTwoPageMode {
-            currentIndex -= 1
-            return
-        }
-        if useCoverOffset && currentIndex == 1 {
-            currentIndex = 0
-            return
-        }
+        if !isTwoPageMode { currentIndex -= 1; return }
+        if useCoverOffset && currentIndex == 1 { currentIndex = 0; return }
         let prevIndex1 = currentIndex - 1
-        if prevIndex1 >= 0 && isWide(pages[prevIndex1]) {
-            currentIndex -= 1
-            return
-        }
+        if prevIndex1 >= 0 && isWide(pages[prevIndex1]) { currentIndex -= 1; return }
         currentIndex = max(0, currentIndex - 2)
     }
     
-    // --- PROGRESS LOGIC (With 95% Completion Rule) ---
+    // --- PROGRESS LOGIC ---
     
     func saveProgress(page: Int) {
         let volName = volumeURL.lastPathComponent
         let totalPages = pages.count
         guard totalPages > 0 else { return }
         
-        // 1. If we hit the last page (100%), Mark Read & Reset
         if page >= totalPages - 1 {
-            if !manga.readVolumes.contains(volName) {
-                manga.readVolumes.append(volName)
-            }
+            if !manga.readVolumes.contains(volName) { manga.readVolumes.append(volName) }
             manga.readingProgress.removeValue(forKey: volName)
             return
         }
         
-        // 2. Otherwise, save current page
-        if page > 0 {
-            manga.readingProgress[volName] = page
-        } else {
-            manga.readingProgress.removeValue(forKey: volName)
-        }
+        if page > 0 { manga.readingProgress[volName] = page }
+        else { manga.readingProgress.removeValue(forKey: volName) }
     }
     
     func restoreProgress() {
@@ -335,40 +301,29 @@ struct MangaReaderView: View {
         let totalPages = pages.count
         guard totalPages > 0 else { return }
         
-        // 3. THE 95% RULE
         let percentage = Double(savedPage) / Double(totalPages)
         
         if percentage < 0.95 {
-            if savedPage < totalPages {
-                currentIndex = savedPage
-            }
+            if savedPage < totalPages { currentIndex = savedPage }
         } else {
             manga.readingProgress.removeValue(forKey: volName)
             currentIndex = 0
         }
     }
     
-    var isVolumeRead: Bool {
-        manga.readVolumes.contains(volumeURL.lastPathComponent)
-    }
+    var isVolumeRead: Bool { manga.readVolumes.contains(volumeURL.lastPathComponent) }
     
     func markAsRead() {
         let name = volumeURL.lastPathComponent
-        if isVolumeRead {
-            manga.readVolumes.removeAll { $0 == name }
-        } else {
-            manga.readVolumes.append(name)
-        }
+        if isVolumeRead { manga.readVolumes.removeAll { $0 == name } }
+        else { manga.readVolumes.append(name) }
     }
 }
-
-// --- SUBVIEWS ---
 
 struct PageView: View {
     let url: URL
     let size: CGSize
     let alignment: Alignment
-    
     var body: some View {
         AsyncImage(url: url)
             .aspectRatio(contentMode: .fit)

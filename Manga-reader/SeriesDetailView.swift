@@ -9,7 +9,6 @@ import Foundation
 import SwiftUI
 import SwiftData
 
-// --- CACHE FOR PAGE COUNTS ---
 class PageCountCache {
     static let shared = NSCache<NSString, NSNumber>()
 }
@@ -90,7 +89,6 @@ struct SeriesDetailView: View {
         }
         .onAppear { loadVolumes() }
         .navigationTitle(manga.title)
-        // --- NEW: TOOLBAR FAVORITE BUTTON ---
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button(action: { manga.isFavorite.toggle() }) {
@@ -100,7 +98,6 @@ struct SeriesDetailView: View {
                 .help(manga.isFavorite ? "Remove from Favorites" : "Add to Favorites")
             }
         }
-        // ------------------------------------
         .alert("Rename Volume", isPresented: $showRenameAlert) {
             TextField("New Name", text: $newName)
             Button("Rename") { if let v = renamingVolume { performRename(v, to: newName) } }
@@ -114,8 +111,15 @@ struct SeriesDetailView: View {
     func loadVolumes() {
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(at: manga.folderURL, includingPropertiesForKeys: nil) else { return }
-        self.volumes = items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        
+        // 👇 CHANGED: Include Directories OR .epub files
+        self.volumes = items.filter { item in
+            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            let isEpub = item.pathExtension.lowercased() == "epub"
+            let isHidden = item.lastPathComponent.hasPrefix(".")
+            return !isHidden && (isDir || isEpub)
+        }
+        .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
     
     func openVolume(_ url: URL) {
@@ -151,7 +155,7 @@ struct SeriesDetailView: View {
     }
 }
 
-// --- FULLY OPTIMIZED VOLUME COVER ---
+// --- UPDATED VOLUME COVER (Handles Folders + EPUBs) ---
 struct VolumeCover: View {
     let folderURL: URL
     let progress: Int?
@@ -169,8 +173,11 @@ struct VolumeCover: View {
             } else if loadFailed {
                 RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.3)).frame(width: 150, height: 220)
                     .overlay(VStack {
-                        Image(systemName: "photo.badge.exclamationmark").font(.largeTitle).foregroundStyle(.secondary.opacity(0.5))
-                        Text("No Cover").font(.caption2).foregroundStyle(.secondary)
+                        // Different icon for EPUB vs Folder
+                        Image(systemName: folderURL.pathExtension == "epub" ? "doc.richtext" : "folder.badge.questionmark")
+                            .font(.largeTitle).foregroundStyle(.secondary.opacity(0.5))
+                        Text(folderURL.pathExtension == "epub" ? "EPUB" : "No Cover")
+                            .font(.caption2).foregroundStyle(.secondary)
                     })
             } else {
                 RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.2)).frame(width: 150, height: 220)
@@ -193,8 +200,6 @@ struct VolumeCover: View {
     
     func loadCover() {
         let cacheKey = folderURL.path as NSString
-        
-        // 1. CHECK BOTH CACHES
         let cachedImage = ThumbnailCache.shared.object(forKey: cacheKey)
         let cachedCount = PageCountCache.shared.object(forKey: cacheKey)
         
@@ -203,39 +208,80 @@ struct VolumeCover: View {
             self.totalPages = count.intValue
             return
         }
-        
-        // 2. MISS
         if let img = cachedImage { self.image = img }
         
         DispatchQueue.global(qos: .userInitiated).async {
-            let fm = FileManager.default
-            let validExts = ["jpg", "jpeg", "png", "avif", "webp"]
-            
-            guard let items = try? fm.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil) else {
-                DispatchQueue.main.async { self.loadFailed = true }
-                return
+            // 👇 LOGIC SPLIT: EPUB vs FOLDER
+            if self.folderURL.pathExtension.lowercased() == "epub" {
+                self.loadEpubCover(key: cacheKey)
+            } else {
+                self.loadFolderCover(key: cacheKey)
             }
+        }
+    }
+    
+    func loadFolderCover(key: NSString) {
+        let fm = FileManager.default
+        let validExts = ["jpg", "jpeg", "png", "avif", "webp"]
+        
+        guard let items = try? fm.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil) else {
+            DispatchQueue.main.async { self.loadFailed = true }
+            return
+        }
+        
+        let images = items.filter { validExts.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        
+        DispatchQueue.main.async {
+            self.totalPages = images.count
+            PageCountCache.shared.setObject(NSNumber(value: images.count), forKey: key)
             
-            let images = items.filter { validExts.contains($0.pathExtension.lowercased()) }
-                .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            if self.image == nil, let first = images.first,
+               let source = CGImageSourceCreateWithURL(first as CFURL, nil),
+               let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 400] as CFDictionary) {
+                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height)))
+                ThumbnailCache.shared.setObject(nsImage, forKey: key)
+                self.image = nsImage
+            } else if self.image == nil {
+                self.loadFailed = true
+            }
+        }
+    }
+    
+    func loadEpubCover(key: NSString) {
+        // Quick extraction of just the first few files to find a cover
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        
+        do {
+            try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            
+            // Native Unzip
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+            // Unzip ONLY jpg/png files, and only the first few if possible
+            process.arguments = ["-q", "-j", folderURL.path, "*.jpg", "*.jpeg", "*.png", "-d", tempDir.path]
+            
+            try process.run()
+            process.waitUntilExit()
+            
+            let items = (try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)) ?? []
+            let images = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
             
             DispatchQueue.main.async {
-                self.totalPages = images.count
-                PageCountCache.shared.setObject(NSNumber(value: images.count), forKey: cacheKey)
-                
-                if self.image == nil {
-                    if let first = images.first,
-                       let source = CGImageSourceCreateWithURL(first as CFURL, nil),
-                       let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 400] as CFDictionary) {
-                        
-                        let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height)))
-                        ThumbnailCache.shared.setObject(nsImage, forKey: cacheKey)
-                        self.image = nsImage
-                    } else {
-                        self.loadFailed = true
-                    }
+                self.totalPages = max(100, images.count) // Approximate page count
+                if let first = images.first,
+                   let img = NSImage(contentsOf: first) {
+                    ThumbnailCache.shared.setObject(img, forKey: key)
+                    self.image = img
+                } else {
+                    self.loadFailed = true
                 }
+                // Cleanup
+                try? fm.removeItem(at: tempDir)
             }
+        } catch {
+            DispatchQueue.main.async { self.loadFailed = true }
         }
     }
 }
