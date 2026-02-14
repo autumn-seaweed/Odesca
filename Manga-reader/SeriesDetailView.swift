@@ -68,7 +68,14 @@ struct SeriesDetailView: View {
                             Button { toggleReadStatus(for: volumeURL, setRead: true) } label: { Label("Mark as Read", systemImage: "checkmark.circle") }
                             Button { toggleReadStatus(for: volumeURL, setRead: false) } label: { Label("Mark as Unread", systemImage: "circle") }
                             Divider()
-                            Button { renamingVolume = volumeURL; newName = volumeURL.lastPathComponent; showRenameAlert = true } label: { Label("Rename...", systemImage: "pencil") }
+                            Button {
+                                renamingVolume = volumeURL
+                                // 👇 IMPROVEMENT 1: Pre-fill name WITHOUT extension for easier editing
+                                newName = volumeURL.deletingPathExtension().lastPathComponent
+                                showRenameAlert = true
+                            } label: {
+                                Label("Rename...", systemImage: "pencil")
+                            }
                             Button { NSWorkspace.shared.activateFileViewerSelecting([volumeURL]) } label: { Label("Reveal in Finder", systemImage: "folder") }
                         }
 
@@ -150,20 +157,38 @@ struct SeriesDetailView: View {
     
     func performRename(_ url: URL, to name: String) {
         let fm = FileManager.default
-        let newURL = url.deletingLastPathComponent().appendingPathComponent(name)
+        
+        // 👇 IMPROVEMENT 2: Smart Extension Handling
+        let originalExtension = url.pathExtension
+        var finalName = name
+        
+        // If the original file had an extension (e.g. "cbz"), make sure the new name keeps it.
+        // We check if the user accidentally typed it themselves to avoid "file.cbz.cbz"
+        if !originalExtension.isEmpty && !finalName.lowercased().hasSuffix("." + originalExtension.lowercased()) {
+            finalName += "." + originalExtension
+        }
+        
+        let newURL = url.deletingLastPathComponent().appendingPathComponent(finalName)
         let oldName = url.lastPathComponent
+        
         do {
             try fm.moveItem(at: url, to: newURL)
+            
+            // Update Read History if renamed
             if manga.readVolumes.contains(oldName) {
                 manga.readVolumes.removeAll { $0 == oldName }
-                manga.readVolumes.append(name)
+                manga.readVolumes.append(newURL.lastPathComponent)
             }
+            // Update Reading Progress if renamed
             if let progress = manga.readingProgress[oldName] {
                 manga.readingProgress.removeValue(forKey: oldName)
-                manga.readingProgress[name] = progress
+                manga.readingProgress[newURL.lastPathComponent] = progress
             }
+            
             loadVolumes()
-        } catch { print("Rename failed: \(error)") }
+        } catch {
+            print("Rename failed: \(error)")
+        }
     }
 }
 
@@ -185,7 +210,6 @@ struct VolumeCover: View {
             } else if loadFailed {
                 RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.3)).frame(width: 150, height: 220)
                     .overlay(VStack {
-                        // Dynamic Icon based on type
                         Image(systemName: isArchive ? "doc.zipper" : "folder")
                             .font(.largeTitle).foregroundStyle(.secondary.opacity(0.5))
                         Text(folderURL.pathExtension.uppercased().isEmpty ? "FOLDER" : folderURL.pathExtension.uppercased())
@@ -269,8 +293,6 @@ struct VolumeCover: View {
         
         do {
             try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
-            
-            // Native Unzip: -j flattens directories (ignoring subfolders), which helps find covers easily
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
             process.arguments = ["-q", "-j", folderURL.path, "*.jpg", "*.jpeg", "*.png", "*.webp", "-d", tempDir.path]
