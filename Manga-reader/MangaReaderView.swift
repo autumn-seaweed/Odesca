@@ -9,6 +9,7 @@ import Foundation
 import SwiftUI
 import AppKit
 
+// Check if this Enum is already in MangaGrid.swift.
 enum ReadingDirection: String, CaseIterable, Identifiable {
     case rightToLeft = "Right to Left (Manga)"
     case leftToRight = "Left to Right (Comic)"
@@ -20,24 +21,35 @@ struct MangaReaderView: View {
     let volumeURL: URL
     @Bindable var manga: MangaSeries
     
+    // Needed for ESC key to work
+    @Environment(\.dismiss) var dismiss
+    
+    // --- STATE ---
     @State private var currentIndex = 0
     @FocusState private var isFocused: Bool
     @State private var pages: [URL] = []
+    
+    // Track if we need to cleanup a temp folder later
     @State private var tempArchiveFolder: URL? = nil
     
+    // --- VIEW OPTIONS ---
     @AppStorage("readingDirection") private var readingDirection: ReadingDirection = .rightToLeft
     @AppStorage("isTwoPageMode") private var isTwoPageMode = false
     @AppStorage("useCoverOffset") private var useCoverOffset = true
 
+    // --- BODY ---
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 Color.black.ignoresSafeArea()
+                
+                // 1. CALCULATE LAYOUT
                 let layout = calculateLayout(for: currentIndex, in: pages)
                 
-                // PAGES LAYER
+                // --- LAYER 1: THE PAGES ---
                 ZStack {
                     if isTwoPageMode {
+                        // --- DOUBLE PAGE MODE ---
                         if let centerPage = layout.center {
                             PageView(url: centerPage, size: geo.size, alignment: .center)
                         } else {
@@ -49,16 +61,21 @@ struct MangaReaderView: View {
                                     PageView(url: page,
                                              size: CGSize(width: geo.size.width / 2, height: geo.size.height),
                                              alignment: .trailing)
-                                } else { Spacer().frame(width: geo.size.width / 2) }
+                                } else {
+                                    Spacer().frame(width: geo.size.width / 2)
+                                }
                                 
                                 if let page = rightPage {
                                     PageView(url: page,
                                              size: CGSize(width: geo.size.width / 2, height: geo.size.height),
                                              alignment: .leading)
-                                } else { Spacer().frame(width: geo.size.width / 2) }
+                                } else {
+                                    Spacer().frame(width: geo.size.width / 2)
+                                }
                             }
                         }
                     } else {
+                        // --- SINGLE PAGE MODE ---
                         if pages.indices.contains(currentIndex) {
                             PageView(url: pages[currentIndex], size: geo.size, alignment: .center)
                         }
@@ -66,7 +83,7 @@ struct MangaReaderView: View {
                 }
                 .frame(width: geo.size.width, height: geo.size.height)
                 
-                // TAP ZONES
+                // --- LAYER 2: NAVIGATION ZONES ---
                 HStack(spacing: 0) {
                     Color.clear.contentShape(Rectangle()).frame(width: 80)
                         .onTapGesture {
@@ -81,7 +98,7 @@ struct MangaReaderView: View {
                         }
                 }
                 
-                // PROGRESS BAR
+                // --- LAYER 3: PROGRESS BAR ---
                 VStack {
                     Spacer()
                     GeometryReader { barGeo in
@@ -104,13 +121,32 @@ struct MangaReaderView: View {
             restoreProgress()
             isFocused = true
             
-            // 👇 UPDATE LAST READ DATE
+            // 👇 FIXED: Update the "Last Read" timestamp so it jumps to the front of the list
             manga.lastReadDate = Date()
         }
         .onDisappear {
-            if let tmp = tempArchiveFolder { try? FileManager.default.removeItem(at: tmp) }
+            // Cleanup Temp Files if we opened an Archive
+            if let tmp = tempArchiveFolder {
+                try? FileManager.default.removeItem(at: tmp)
+            }
         }
-        .onChange(of: currentIndex) { _, newIndex in saveProgress(page: newIndex) }
+        .onChange(of: currentIndex) { _, newIndex in
+            saveProgress(page: newIndex)
+        }
+        // Keyboard Handlers
+        .onKeyPress(.escape) {
+            dismiss()
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            let layout = calculateLayout(for: currentIndex, in: pages)
+            navigateNext(step: isTwoPageMode ? layout.step : 1)
+            return .handled
+        }
+        .onKeyPress(.upArrow) {
+            navigatePrevious()
+            return .handled
+        }
         .onKeyPress(.leftArrow) {
             let layout = calculateLayout(for: currentIndex, in: pages)
             if readingDirection == .rightToLeft { navigateNext(step: isTwoPageMode ? layout.step : 1) }
@@ -156,11 +192,15 @@ struct MangaReaderView: View {
         }
     }
     
+    // --- HELPER PROPERTIES ---
+    
     private var currentTitle: String { "\(manga.title)  ›  \(volumeURL.lastPathComponent)" }
     private var currentSubtitle: String {
         guard pages.indices.contains(currentIndex) else { return "" }
         return "\(pages[currentIndex].lastPathComponent)   (\(currentIndex + 1) / \(pages.count))"
     }
+    
+    // --- LOGIC ---
     
     struct PageLayout {
         var right: URL? = nil
@@ -194,7 +234,11 @@ struct MangaReaderView: View {
 
     func loadPages() {
         let ext = volumeURL.pathExtension.lowercased()
-        if ["epub", "zip", "cbz"].contains(ext) { loadArchive() } else { loadDirectory(volumeURL) }
+        if ["epub", "zip", "cbz"].contains(ext) {
+            loadArchive()
+        } else {
+            loadDirectory(volumeURL)
+        }
     }
     
     func loadDirectory(_ dir: URL) {
@@ -206,29 +250,41 @@ struct MangaReaderView: View {
     }
     
     func loadArchive() {
+        // 1. Create Temp Directory
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         self.tempArchiveFolder = tempDir
         
         do {
             try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            
+            // 2. Unzip using macOS native tool
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+            // -q: Quiet
+            // -d: Destination
             process.arguments = ["-q", volumeURL.path, "-d", tempDir.path]
-            try process.run(); process.waitUntilExit()
             
+            try process.run()
+            process.waitUntilExit()
+            
+            // 3. Find Images recursively
             if let enumerator = fm.enumerator(at: tempDir, includingPropertiesForKeys: nil) {
                 var foundImages: [URL] = []
                 for case let fileURL as URL in enumerator {
                     if ["jpg", "jpeg", "png", "avif", "webp"].contains(fileURL.pathExtension.lowercased()) {
+                        // Exclude weird hidden files like __MACOSX/._image.jpg
                         if !fileURL.path.contains("__MACOSX") && !fileURL.lastPathComponent.hasPrefix(".") {
                             foundImages.append(fileURL)
                         }
                     }
                 }
+                // Sort images
                 self.pages = foundImages.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
             }
-        } catch { print("Failed to unzip archive: \(error)") }
+        } catch {
+            print("Failed to unzip archive: \(error)")
+        }
     }
     
     func navigateNext(step: Int) {
@@ -245,12 +301,14 @@ struct MangaReaderView: View {
         currentIndex = max(0, currentIndex - 2)
     }
     
+    // --- PROGRESS LOGIC ---
+    
     func saveProgress(page: Int) {
         let volName = volumeURL.lastPathComponent
         let totalPages = pages.count
         guard totalPages > 0 else { return }
         
-        // Also update timestamp on progress change
+        // 👇 FIXED: Ensure date updates as you turn pages
         manga.lastReadDate = Date()
         
         if page >= totalPages - 1 {
@@ -258,6 +316,7 @@ struct MangaReaderView: View {
             manga.readingProgress.removeValue(forKey: volName)
             return
         }
+        
         if page > 0 { manga.readingProgress[volName] = page }
         else { manga.readingProgress.removeValue(forKey: volName) }
     }
@@ -265,10 +324,12 @@ struct MangaReaderView: View {
     func restoreProgress() {
         let volName = volumeURL.lastPathComponent
         guard let savedPage = manga.readingProgress[volName] else { return }
+        
         let totalPages = pages.count
         guard totalPages > 0 else { return }
         
         let percentage = Double(savedPage) / Double(totalPages)
+        
         if percentage < 0.95 {
             if savedPage < totalPages { currentIndex = savedPage }
         } else {

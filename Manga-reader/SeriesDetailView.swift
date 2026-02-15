@@ -22,26 +22,29 @@ struct SeriesDetailView: View {
     @Environment(\.modelContext) var modelContext
     
     @State private var volumes: [URL] = []
-    @State private var selectedVolume: URL?
+    
+    // Multi-Select Support
+    @State private var selectedVolumes: Set<URL> = []
+    
     @State private var renamingVolume: URL?
     @State private var newName: String = ""
     @State private var showRenameAlert = false
     
-    // Alert state for the cleanup feature
     @State private var showCleanupConfirm = false
     @State private var cleanupPreview = ""
     @State private var cleanupCount = 0
 
     var body: some View {
         ScrollView {
-            // Invisible tapper to deselect
+            // Click background to deselect all
             Color.clear.contentShape(Rectangle())
                 .frame(height: 1)
-                .onTapGesture { selectedVolume = nil }
+                .onTapGesture { selectedVolumes.removeAll() }
             
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 20) {
                 ForEach(volumes, id: \.self) { volumeURL in
                     let isRead = manga.readVolumes.contains(volumeURL.lastPathComponent)
+                    let isSelected = selectedVolumes.contains(volumeURL)
                     
                     VStack {
                         VolumeCover(
@@ -50,30 +53,44 @@ struct SeriesDetailView: View {
                             isRead: isRead
                         )
                         .frame(height: 220)
+                        
+                        // Selection Border
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
+                        )
+                        .contentShape(Rectangle())
+                        
+                        // GESTURES
                         .onTapGesture(count: 2) {
                             openVolume(volumeURL)
                         }
                         .onTapGesture {
-                            selectedVolume = volumeURL
+                            handleSelection(volumeURL)
                         }
-                        // Selection Border
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(selectedVolume == volumeURL ? Color.accentColor : Color.clear, lineWidth: 3)
-                        )
+                        
+                        // CONTEXT MENU
                         .contextMenu {
                             Button("Open") { openVolume(volumeURL) }
+                            
                             Divider()
-                            Button(isRead ? "Mark Unread" : "Mark Read") { toggleRead(volumeURL) }
-                            Button("Mark Previous as Read") { markPreviousAsRead(from: volumeURL) }
+                            
+                            Button("Mark as Read") { batchToggleRead(read: true, clicked: volumeURL) }
+                            Button("Mark as Unread") { batchToggleRead(read: false, clicked: volumeURL) }
+                            
                             Divider()
-                            Button("Rename...") {
-                                renamingVolume = volumeURL
-                                newName = volumeURL.lastPathComponent
-                                showRenameAlert = true
+                            
+                            if selectedVolumes.count <= 1 {
+                                Button("Rename...") {
+                                    renamingVolume = volumeURL
+                                    newName = volumeURL.lastPathComponent
+                                    showRenameAlert = true
+                                }
                             }
+                            
                             Button("Reveal in Finder") {
-                                NSWorkspace.shared.activateFileViewerSelecting([volumeURL])
+                                let targets = getTargets(clicked: volumeURL)
+                                NSWorkspace.shared.activateFileViewerSelecting(targets)
                             }
                         }
                         
@@ -88,6 +105,14 @@ struct SeriesDetailView: View {
             .padding()
         }
         .navigationTitle(manga.title)
+        // 👇 NEW: Focusable enables key presses
+        .focusable()
+        .focusEffectDisabled()
+        // 👇 NEW: ESC to Go Back
+        .onKeyPress(.escape) {
+            dismiss()
+            return .handled
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { scanVolumes() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
@@ -111,6 +136,41 @@ struct SeriesDetailView: View {
     }
     
     // MARK: - Logic
+    
+    func handleSelection(_ url: URL) {
+        if NSEvent.modifierFlags.contains(.command) {
+            if selectedVolumes.contains(url) {
+                selectedVolumes.remove(url)
+            } else {
+                selectedVolumes.insert(url)
+            }
+        } else {
+            selectedVolumes = [url]
+        }
+    }
+    
+    func getTargets(clicked: URL) -> [URL] {
+        if selectedVolumes.contains(clicked) {
+            return Array(selectedVolumes)
+        } else {
+            return [clicked]
+        }
+    }
+    
+    func batchToggleRead(read: Bool, clicked: URL) {
+        let targets = getTargets(clicked: clicked)
+        
+        for url in targets {
+            let name = url.lastPathComponent
+            if read {
+                if !manga.readVolumes.contains(name) { manga.readVolumes.append(name) }
+                manga.readingProgress.removeValue(forKey: name)
+            } else {
+                manga.readVolumes.removeAll { $0 == name }
+            }
+        }
+        checkIfFinished()
+    }
     
     func scanVolumes() {
         let fm = FileManager.default
@@ -205,6 +265,8 @@ struct SeriesDetailView: View {
         let readNames = Set(manga.readVolumes)
         if readNames.isSuperset(of: allNames) {
             manga.isFinished = true
+        } else {
+            manga.isFinished = false
         }
     }
     
@@ -257,7 +319,6 @@ struct VolumeCover: View {
     
     var body: some View {
         ZStack(alignment: .bottom) {
-            // 1. THE COVER IMAGE
             if let img = image {
                 Image(nsImage: img)
                     .resizable()
@@ -283,40 +344,42 @@ struct VolumeCover: View {
                     .overlay(ProgressView())
             }
             
-            // 2. THE PLEX BADGE (Top Right)
+            // 2. THE PLEX BADGE
             if isRead {
                 VStack {
                     HStack {
                         Spacer()
-                        // 🟧 THE PLEX BADGE
                         Image(systemName: "checkmark")
-                                                    .font(.system(size: 12, weight: .bold)) // Slightly larger icon
-                                                    .foregroundColor(.white)
-                                                    .padding(8) // Larger padding = Larger box
-                                                    .background(Color.black.opacity(0.8))
-                                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                                                    // 👇 NEW: White Border
-                                                    .overlay(
-                                                        RoundedRectangle(cornerRadius: 6)
-                                                            .stroke(Color.white, lineWidth: 1.5)
-                                                    )
-                                                    .padding(6) // Margin from the edge of the cover
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(8)
+                            .background(Color.black.opacity(0.8))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.white, lineWidth: 1.5)
+                            )
+                            .padding(6)
                     }
                     Spacer()
                 }
-            } else if let prog = progress, totalPages > 0 {
-                // 3. PROGRESS BAR (Only if NOT read)
-                let percent = Double(prog) / Double(totalPages)
-                VStack {
-                    Spacer()
-                    ProgressView(value: percent)
-                        .progressViewStyle(.linear)
-                        .tint(.accentColor)
-                        .padding(.horizontal, 8)
-                        .padding(.bottom, 8)
+            }
+            // 3. THE PROGRESS BAR
+            else if let prog = progress, totalPages > 0 {
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(Color.black.opacity(0.7))
+                        Rectangle().fill(Color.accentColor)
+                            .frame(width: geo.size.width * (CGFloat(prog) / CGFloat(totalPages)))
+                    }
                 }
+                .frame(height: 6)
+                .cornerRadius(3)
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
             }
         }
+        .contentShape(Rectangle())
         .onAppear { loadCover() }
     }
     
@@ -326,13 +389,25 @@ struct VolumeCover: View {
         let cacheKey = folderURL.path as NSString
         let cachedImage = ThumbnailCache.shared.object(forKey: cacheKey)
         let cachedCount = PageCountCache.shared.object(forKey: cacheKey)
-        if let img = cachedImage, let count = cachedCount {
-            self.image = img; self.totalPages = count.intValue; return
+        
+        if let count = cachedCount { self.totalPages = count.intValue }
+        
+        if let img = cachedImage {
+            self.image = img
+            if self.totalPages > 0 { return }
         }
-        if let img = cachedImage { self.image = img }
+        
         DispatchQueue.global(qos: .userInitiated).async {
             if self.isArchive { self.loadArchiveCover(key: cacheKey) } else { self.loadFolderCover(key: cacheKey) }
         }
+    }
+    
+    func downsample(url: URL) -> NSImage? {
+        let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 300] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts) else { return nil }
+        return NSImage(cgImage: cg, size: .zero)
     }
     
     func loadFolderCover(key: NSString) {
@@ -342,12 +417,16 @@ struct VolumeCover: View {
             DispatchQueue.main.async { self.loadFailed = true }; return
         }
         let images = items.filter { validExts.contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        
         DispatchQueue.main.async {
             self.totalPages = images.count
             PageCountCache.shared.setObject(NSNumber(value: images.count), forKey: key)
-            if self.image == nil, let first = images.first, let source = CGImageSourceCreateWithURL(first as CFURL, nil), let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 400] as CFDictionary) {
-                let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: CGFloat(cgImage.width), height: CGFloat(cgImage.height)))
-                ThumbnailCache.shared.setObject(nsImage, forKey: key); self.image = nsImage
+            
+            if self.image == nil, let first = images.first {
+                if let thumb = self.downsample(url: first) {
+                    ThumbnailCache.shared.setObject(thumb, forKey: key)
+                    self.image = thumb
+                } else { self.loadFailed = true }
             } else if self.image == nil { self.loadFailed = true }
         }
     }
@@ -359,18 +438,33 @@ struct VolumeCover: View {
             try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            process.arguments = ["-q", "-j", folderURL.path, "*.jpg", "*.jpeg", "*.png", "*.webp", "-d", tempDir.path]
+            process.arguments = ["-q", "-j", folderURL.path,
+                                 "*.jpg", "*.jpeg", "*.png", "*.webp",
+                                 "*.JPG", "*.JPEG", "*.PNG", "*.WEBP",
+                                 "-d", tempDir.path]
             try process.run(); process.waitUntilExit()
+            
             let items = (try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)) ?? []
             let images = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            
             DispatchQueue.main.async {
-                self.totalPages = max(100, images.count)
-                if let first = images.first, let img = NSImage(contentsOf: first) {
-                    ThumbnailCache.shared.setObject(img, forKey: key); self.image = img
-                } else { self.loadFailed = true }
+                self.totalPages = images.isEmpty ? 100 : max(100, images.count)
+                PageCountCache.shared.setObject(NSNumber(value: self.totalPages), forKey: key)
+                
+                if let first = images.first, let thumb = self.downsample(url: first) {
+                    ThumbnailCache.shared.setObject(thumb, forKey: key)
+                    self.image = thumb
+                } else {
+                    self.loadFailed = true
+                }
                 try? fm.removeItem(at: tempDir)
             }
-        } catch { DispatchQueue.main.async { self.loadFailed = true } }
+        } catch {
+            DispatchQueue.main.async {
+                self.loadFailed = true
+                self.totalPages = 100
+            }
+        }
     }
 }
 
