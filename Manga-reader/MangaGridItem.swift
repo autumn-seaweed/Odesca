@@ -20,26 +20,18 @@ struct MangaGridItem: View, Equatable {
     
     var body: some View {
         VStack(spacing: 8) {
-            // 👇 THE FIX: Use a rigid container for layout, put image in overlay
-            ZStack {
-                // 1. The Layout Frame (Transparent, rigid)
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.clear)
-                    .frame(height: 230) // Strict Height
-                
-                // 2. The Content (Flexible, Clipped)
-                AsyncMangaCover(item: item)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 2)
-            }
-            // 3. Selection Border (On top of everything)
-            .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(isSelected ? Color.accentColor : Color.white.opacity(0.1), lineWidth: isSelected ? 3 : 1)
-            )
-            .contentShape(Rectangle()) // Ensure empty areas are clickable
+            // FIXED: Just provide the Frame, GeometryReader in Cover does the rest
+            AsyncMangaCover(item: item)
+                .frame(height: 230)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 2)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(isSelected ? Color.accentColor : Color.white.opacity(0.1), lineWidth: isSelected ? 3 : 1)
+                )
+                .contentShape(Rectangle())
             
-            // Info Text
+            // INFO TEXT
             VStack(spacing: 2) {
                 HStack(spacing: 4) {
                     if item.isFavorite {

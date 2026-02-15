@@ -62,7 +62,7 @@ struct MangaGrid: View {
     let searchString: String
     let filter: LibraryFilter
     
-    // Grid Layout: Fixed spacing prevents "touching"
+    // Spacing helps prevent visual collision
     let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 20)]
     
     init(sort: SortDescriptor<MangaSeries>, searchString: String, filter: LibraryFilter, navPath: Binding<NavigationPath>, recents: [MangaSeries]) {
@@ -329,12 +329,11 @@ struct RecentCard: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(Color.clear).frame(width: 120, height: 170)
-                AsyncMangaCover(item: MangaDisplayItem(manga: manga))
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .shadow(radius: 2)
+            // Recents use a simpler fixed frame as they are not in a flexible grid
+            AsyncMangaCover(item: MangaDisplayItem(manga: manga))
+                .frame(width: 120, height: 170)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .shadow(radius: 2)
             
             Text(manga.title)
                 .font(.caption)
@@ -348,7 +347,7 @@ struct RecentCard: View {
     }
 }
 
-// --- 5. ASYNC COVER (Reused) ---
+// --- 5. ASYNC COVER (GeometryReader Restored) ---
 struct AsyncMangaCover: View {
     let item: MangaDisplayItem
     
@@ -358,6 +357,7 @@ struct AsyncMangaCover: View {
     var body: some View {
         Group {
             if let img = image {
+                // 👇 RESTORED: GeometryReader forces strict aspect ratio filling
                 GeometryReader { geo in
                     Image(nsImage: img)
                         .resizable()
@@ -396,31 +396,69 @@ struct AsyncMangaCover: View {
             if Task.isCancelled { return nil }
             let fm = FileManager.default
             
+            // Helper to generate a small thumbnail from any URL
+            func downsample(url: URL, pointSize: CGFloat) -> NSImage? {
+                let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                            kCGImageSourceThumbnailMaxPixelSize: pointSize] as CFDictionary
+                guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+                      let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts) else { return nil }
+                return NSImage(cgImage: cg, size: .zero)
+            }
+            
             func findImage(in dir: URL, depth: Int) -> NSImage? {
                 if depth > 2 { return nil }
                 guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey]) else { return nil }
                 
+                // 1. Loose Images
                 let images = items.filter { ["jpg", "png", "jpeg", "webp", "avif"].contains($0.pathExtension.lowercased()) }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
                 
-                if let first = images.first, let source = CGImageSourceCreateWithURL(first as CFURL, nil) {
-                    let opts = [kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 400] as CFDictionary
-                    if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts) { return NSImage(cgImage: cg, size: .zero) }
+                if let first = images.first {
+                    // Downsample standard images (300px max)
+                    if let thumb = downsample(url: first, pointSize: 300) { return thumb }
                 }
                 
+                // 2. Archives (EPUB/ZIP/CBZ)
                 let archives = items.filter { ["epub", "zip", "cbz"].contains($0.pathExtension.lowercased()) }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                
                 for archiveURL in archives {
-                    if let img = extractFirstImageFromArchive(url: archiveURL) { return img }
+                    // Extract AND downsample
+                    if let img = extractAndResize(url: archiveURL) { return img }
                 }
                 
+                // 3. Subfolders
                 let folders = items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                
                 for folder in folders {
                     if let img = findImage(in: folder, depth: depth + 1) { return img }
                 }
                 return nil
             }
+            
+            func extractAndResize(url: URL) -> NSImage? {
+                let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+                defer { try? fm.removeItem(at: tempDir) }
+                do {
+                    try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+                    let process = Process()
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+                    // Unzip ONLY images, flattened (-j)
+                    process.arguments = ["-q", "-j", url.path, "*.jpg", "*.jpeg", "*.png", "*.webp", "-d", tempDir.path]
+                    try process.run(); process.waitUntilExit()
+                    
+                    let items = (try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)) ?? []
+                    let sorted = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                    
+                    // Resize the massive extracted image immediately
+                    if let first = sorted.first {
+                        return downsample(url: first, pointSize: 300)
+                    }
+                } catch { return nil }
+                return nil
+            }
+            
             return findImage(in: item.folderURL, depth: 0)
         }.value
         
@@ -431,22 +469,5 @@ struct AsyncMangaCover: View {
         } else {
             self.loadFailed = true
         }
-    }
-
-    func extractFirstImageFromArchive(url: URL) -> NSImage? {
-        let fm = FileManager.default
-        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? fm.removeItem(at: tempDir) }
-        do {
-            try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            process.arguments = ["-q", "-j", url.path, "*.jpg", "*.jpeg", "*.png", "*.webp", "-d", tempDir.path]
-            try process.run(); process.waitUntilExit()
-            let items = (try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)) ?? []
-            let sortedImages = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-            if let first = sortedImages.first, let img = NSImage(contentsOf: first) { return img }
-        } catch { return nil }
-        return nil
     }
 }

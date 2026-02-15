@@ -34,6 +34,7 @@ struct SeriesDetailView: View {
 
     var body: some View {
         ScrollView {
+            // Invisible tapper to deselect
             Color.clear.contentShape(Rectangle())
                 .frame(height: 1)
                 .onTapGesture { selectedVolume = nil }
@@ -45,319 +46,202 @@ struct SeriesDetailView: View {
                     VStack {
                         VolumeCover(
                             folderURL: volumeURL,
-                            progress: manga.readingProgress[volumeURL.lastPathComponent]
+                            progress: manga.readingProgress[volumeURL.lastPathComponent],
+                            isRead: isRead
                         )
-                        .opacity(isRead ? 0.5 : 1.0)
-                        
-                        // Green Check Mark
-                        .overlay(alignment: .topTrailing) {
-                            if isRead {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .font(.title)
-                                    .foregroundStyle(.green)
-                                    .background(Circle().fill(.white))
-                                    .padding(8)
-                                    .shadow(radius: 3)
-                            }
+                        .frame(height: 220)
+                        .onTapGesture(count: 2) {
+                            openVolume(volumeURL)
+                        }
+                        .onTapGesture {
+                            selectedVolume = volumeURL
                         }
                         // Selection Border
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.accentColor, lineWidth: selectedVolume == volumeURL ? 3 : 0)
+                                .stroke(selectedVolume == volumeURL ? Color.accentColor : Color.clear, lineWidth: 3)
                         )
-                        .contentShape(Rectangle())
-                        .onTapGesture(count: 2) { openVolume(volumeURL) }
-                        .onTapGesture(count: 1) { selectedVolume = volumeURL }
                         .contextMenu {
-                            Button { openVolume(volumeURL) } label: { Label("Open (Auto)", systemImage: "book") }
-                            
-                            // 👇 NEW: Manual Override Options
-                            if ["epub"].contains(volumeURL.pathExtension.lowercased()) {
-                                Divider()
-                                Button { openVolume(volumeURL, forceMode: .novel) } label: { Label("Open as Text Book", systemImage: "text.justify.left") }
-                                Button { openVolume(volumeURL, forceMode: .manga) } label: { Label("Open as Comic", systemImage: "photo.on.rectangle") }
-                            }
-                            
+                            Button("Open") { openVolume(volumeURL) }
                             Divider()
-                            Button { toggleReadStatus(for: volumeURL, setRead: true) } label: { Label("Mark as Read", systemImage: "checkmark.circle") }
-                            Button { toggleReadStatus(for: volumeURL, setRead: false) } label: { Label("Mark as Unread", systemImage: "circle") }
+                            Button(isRead ? "Mark Unread" : "Mark Read") { toggleRead(volumeURL) }
+                            Button("Mark Previous as Read") { markPreviousAsRead(from: volumeURL) }
                             Divider()
-                            Button {
+                            Button("Rename...") {
                                 renamingVolume = volumeURL
-                                newName = volumeURL.deletingPathExtension().lastPathComponent
+                                newName = volumeURL.lastPathComponent
                                 showRenameAlert = true
-                            } label: {
-                                Label("Rename...", systemImage: "pencil")
                             }
-                            Button { NSWorkspace.shared.activateFileViewerSelecting([volumeURL]) } label: { Label("Reveal in Finder", systemImage: "folder") }
-                        }
-
-                        HStack {
-                            Text(volumeURL.lastPathComponent)
-                                .font(.headline).lineLimit(1)
-                                .background(selectedVolume == volumeURL ? Color.accentColor.opacity(0.3) : Color.clear)
-                                .cornerRadius(4)
-                                .foregroundStyle(isRead ? .secondary : .primary)
-                            
-                            Spacer()
-                            
-                            Button {
-                                toggleReadStatus(for: volumeURL, setRead: !isRead)
-                            } label: {
-                                Image(systemName: isRead ? "eye.slash" : "eye")
-                                    .foregroundStyle(.secondary)
+                            Button("Reveal in Finder") {
+                                NSWorkspace.shared.activateFileViewerSelecting([volumeURL])
                             }
-                            .buttonStyle(.plain)
                         }
-                        .frame(width: 150)
+                        
+                        Text(volumeURL.lastPathComponent)
+                            .font(.caption)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(isRead ? .secondary : .primary)
                     }
                 }
             }
             .padding()
         }
-        .onAppear { loadVolumes() }
         .navigationTitle(manga.title)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button(action: { manga.isFavorite.toggle() }) {
-                    Label("Favorite", systemImage: manga.isFavorite ? "star.fill" : "star")
-                        .foregroundStyle(manga.isFavorite ? .yellow : .primary)
-                }
-                .help(manga.isFavorite ? "Remove from Favorites" : "Add to Favorites")
+                Button { scanVolumes() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
             }
-            
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button(action: prepareCleanup) {
-                        Label("Clean Up Filenames...", systemImage: "wand.and.stars")
-                    }
-                } label: {
-                    Label("Options", systemImage: "gear")
-                }
+            ToolbarItem(placement: .destructiveAction) {
+                Button { analyzeCleanup() } label: { Label("Clean Names", systemImage: "wand.and.stars") }
             }
         }
+        .onAppear { scanVolumes() }
         .alert("Rename Volume", isPresented: $showRenameAlert) {
             TextField("New Name", text: $newName)
-            Button("Rename") { if let v = renamingVolume { performRename(v, to: newName) } }
+            Button("Rename") { if let v = renamingVolume { renameVolume(v, to: newName) } }
             Button("Cancel", role: .cancel) { }
         }
-        .alert("Rename \(cleanupCount) Items?", isPresented: $showCleanupConfirm) {
-            Button("Rename All", role: .destructive) { performCleanup() }
+        .alert("Clean Up File Names?", isPresented: $showCleanupConfirm) {
+            Button("Rename \(cleanupCount) Files", role: .destructive) { performCleanup() }
             Button("Cancel", role: .cancel) { }
         } message: {
             Text(cleanupPreview)
         }
-        .background(Button("") { dismiss() }.keyboardShortcut(.cancelAction).opacity(0))
     }
     
-    // --- ACTIONS ---
+    // MARK: - Logic
     
-    func loadVolumes() {
+    func scanVolumes() {
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: manga.folderURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
+        guard let items = try? fm.contentsOfDirectory(at: manga.folderURL, includingPropertiesForKeys: nil) else { return }
         
-        let archiveExts = ["epub", "zip", "cbz"]
+        let validExtensions = ["cbz", "zip", "epub"]
         
-        self.volumes = items.filter { item in
-            let name = item.lastPathComponent
-            if name.hasPrefix(".") { return false }
-            
-            let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            let isArchive = archiveExts.contains(item.pathExtension.lowercased())
-            
-            return isDir || isArchive
+        self.volumes = items.filter { url in
+            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            let isArchive = validExtensions.contains(url.pathExtension.lowercased())
+            let isHidden = url.lastPathComponent.hasPrefix(".")
+            return !isHidden && (isDir || isArchive)
+        }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        
+        if manga.volumeCount != volumes.count {
+            manga.volumeCount = volumes.count
         }
-        .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
     }
     
-    enum OpenMode {
-        case auto, novel, manga
-    }
-    
-    func openVolume(_ url: URL, forceMode: OpenMode = .auto) {
+    func openVolume(_ url: URL) {
         let ext = url.pathExtension.lowercased()
         
-        if forceMode == .novel {
-            navPath.append(NovelDestination(url: url, mangaID: manga.persistentModelID))
-            return
-        }
-        
-        if forceMode == .manga {
+        if ["zip", "cbz"].contains(ext) || (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
             navPath.append(VolumeDestination(volumeURL: url, mangaID: manga.persistentModelID))
             return
         }
         
         if ext == "epub" {
-            // 🕵️ IMPROVED SMART DETECTION
-            checkEpubType(url: url) { isNovel in
-                if isNovel {
-                    navPath.append(NovelDestination(url: url, mangaID: manga.persistentModelID))
-                } else {
-                    navPath.append(VolumeDestination(volumeURL: url, mangaID: manga.persistentModelID))
-                }
+            if isVisualEpub(url) {
+                navPath.append(VolumeDestination(volumeURL: url, mangaID: manga.persistentModelID))
+            } else {
+                navPath.append(NovelDestination(url: url, mangaID: manga.persistentModelID))
             }
-        } else {
-            // Zip/CBZ/Folders are always Manga
-            navPath.append(VolumeDestination(volumeURL: url, mangaID: manga.persistentModelID))
         }
     }
     
-    func checkEpubType(url: URL, completion: @escaping (Bool) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            process.arguments = ["-l", url.path] // List contents with sizes
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            
-            try? process.run()
+    func isVisualEpub(_ url: URL) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        process.arguments = ["-l", url.path]
+        
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        
+        do {
+            try process.run()
             process.waitUntilExit()
             
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8) {
-                let lines = output.components(separatedBy: .newlines)
-                
-                var imageCount = 0
-                var totalTextSize: Int64 = 0
-                
-                for line in lines {
-                    let l = line.lowercased()
-                    
-                    // Count Images
-                    if l.contains(".jpg") || l.contains(".png") || l.contains(".webp") {
-                        imageCount += 1
-                    }
-                    
-                    // Sum Text Size
-                    if l.contains(".html") || l.contains(".xhtml") || l.contains(".xml") {
-                        // Extract size from "unzip -l" output (usually the first number)
-                        let parts = line.trimmingCharacters(in: .whitespaces).components(separatedBy: .whitespaces)
-                        if let first = parts.first, let size = Int64(first) {
-                            totalTextSize += size
-                        }
-                    }
+            guard let output = String(data: data, encoding: .utf8) else { return false }
+            
+            let lines = output.components(separatedBy: .newlines)
+            var imageCount = 0
+            for line in lines {
+                let lower = line.lowercased()
+                if lower.contains(".jpg") || lower.contains(".jpeg") || lower.contains(".png") || lower.contains(".webp") {
+                    imageCount += 1
                 }
-                
-                // DECISION LOGIC:
-                // 1. If text size > 40KB, it's almost certainly a Novel (Manga wrapper HTMLs are tiny).
-                // 2. Otherwise, fall back to image count.
-                let isNovel = totalTextSize > 40_000 || imageCount < 15
-                
-                DispatchQueue.main.async { completion(isNovel) }
-                
-            } else {
-                DispatchQueue.main.async { completion(false) }
             }
+            return imageCount > 30
+        } catch {
+            return false
         }
     }
     
-    func toggleReadStatus(for url: URL, setRead: Bool) {
+    func toggleRead(_ url: URL) {
         let name = url.lastPathComponent
-        if setRead {
-            if !manga.readVolumes.contains(name) { manga.readVolumes.append(name) }
-            manga.readingProgress.removeValue(forKey: name)
-        } else {
+        if manga.readVolumes.contains(name) {
             manga.readVolumes.removeAll { $0 == name }
-        }
-    }
-    
-    func performRename(_ url: URL, to name: String) {
-        let fm = FileManager.default
-        let originalExtension = url.pathExtension
-        var finalName = name
-        
-        if !originalExtension.isEmpty && !finalName.lowercased().hasSuffix("." + originalExtension.lowercased()) {
-            finalName += "." + originalExtension
-        }
-        
-        let newURL = url.deletingLastPathComponent().appendingPathComponent(finalName)
-        let oldName = url.lastPathComponent
-        
-        do {
-            try fm.moveItem(at: url, to: newURL)
-            if manga.readVolumes.contains(oldName) {
-                manga.readVolumes.removeAll { $0 == oldName }
-                manga.readVolumes.append(newURL.lastPathComponent)
-            }
-            if let progress = manga.readingProgress[oldName] {
-                manga.readingProgress.removeValue(forKey: oldName)
-                manga.readingProgress[newURL.lastPathComponent] = progress
-            }
-            loadVolumes()
-        } catch { print("Rename failed: \(error)") }
-    }
-    
-    // --- CLEANUP LOGIC ---
-    func prepareCleanup() {
-        var changes: [(from: String, to: String)] = []
-        for url in volumes {
-            let oldName = url.lastPathComponent
-            let ext = url.pathExtension
-            let nameNoExt = url.deletingPathExtension().lastPathComponent
-            let baseName = extractNumber(from: nameNoExt)
-            if baseName.isEmpty || baseName == nameNoExt { continue }
-            let newName = ext.isEmpty ? baseName : "\(baseName).\(ext)"
-            if oldName != newName { changes.append((oldName, newName)) }
-        }
-        cleanupCount = changes.count
-        if changes.isEmpty {
-            cleanupPreview = "All filenames are already clean!"
-            cleanupCount = 0
-            showCleanupConfirm = true
+            manga.isFinished = false
         } else {
-            var message = "This will rename \(cleanupCount) files to shorten their names.\n\nExamples:\n"
-            let previewLimit = 5
-            for change in changes.prefix(previewLimit) {
-                message += "• \"\(change.from)\"\n   → \"\(change.to)\"\n"
-            }
-            if changes.count > previewLimit { message += "\n...and \(changes.count - previewLimit) others." }
-            message += "\n\nThis action cannot be undone."
-            cleanupPreview = message
-            showCleanupConfirm = true
+            manga.readVolumes.append(name)
+            checkIfFinished()
         }
+    }
+    
+    func markPreviousAsRead(from url: URL) {
+        guard let index = volumes.firstIndex(of: url) else { return }
+        let previousVolumes = volumes.prefix(upTo: index + 1)
+        
+        for vol in previousVolumes {
+            let name = vol.lastPathComponent
+            if !manga.readVolumes.contains(name) {
+                manga.readVolumes.append(name)
+            }
+        }
+        checkIfFinished()
+    }
+    
+    func checkIfFinished() {
+        let allNames = Set(volumes.map { $0.lastPathComponent })
+        let readNames = Set(manga.readVolumes)
+        if readNames.isSuperset(of: allNames) {
+            manga.isFinished = true
+        }
+    }
+    
+    func renameVolume(_ url: URL, to name: String) {
+        let newURL = url.deletingLastPathComponent().appendingPathComponent(name)
+        do {
+            try FileManager.default.moveItem(at: url, to: newURL)
+            scanVolumes()
+        } catch {
+            print("Rename failed: \(error)")
+        }
+    }
+    
+    func analyzeCleanup() {
+        let cleaner = NameCleaner()
+        let actions = cleaner.analyze(volumes: volumes)
+        
+        if actions.isEmpty {
+            cleanupPreview = "Filenames already look clean!"
+            cleanupCount = 0
+        } else {
+            cleanupCount = actions.count
+            let sample = actions.prefix(3).map { "\($0.original.lastPathComponent) → \($0.newName)" }.joined(separator: "\n")
+            cleanupPreview = "Found \(actions.count) files to rename.\n\nExamples:\n\(sample)\n\n..."
+        }
+        showCleanupConfirm = true
     }
     
     func performCleanup() {
-        let fm = FileManager.default
-        for url in volumes {
-            let oldName = url.lastPathComponent
-            let ext = url.pathExtension
-            let nameNoExt = url.deletingPathExtension().lastPathComponent
-            let baseName = extractNumber(from: nameNoExt)
-            if baseName.isEmpty || baseName == nameNoExt { continue }
-            let newName = ext.isEmpty ? baseName : "\(baseName).\(ext)"
-            if oldName == newName { continue }
-            let newURL = url.deletingLastPathComponent().appendingPathComponent(newName)
-            do {
-                try fm.moveItem(at: url, to: newURL)
-                if manga.readVolumes.contains(oldName) {
-                    manga.readVolumes.removeAll { $0 == oldName }
-                    manga.readVolumes.append(newName)
-                }
-                if let progress = manga.readingProgress[oldName] {
-                    manga.readingProgress.removeValue(forKey: oldName)
-                    manga.readingProgress[newName] = progress
-                }
-            } catch { print("Failed to rename \(oldName): \(error)") }
+        let cleaner = NameCleaner()
+        let actions = cleaner.analyze(volumes: volumes)
+        
+        for action in actions {
+            let newURL = action.original.deletingLastPathComponent().appendingPathComponent(action.newName)
+            try? FileManager.default.moveItem(at: action.original, to: newURL)
         }
-        try? modelContext.save()
-        loadVolumes()
-    }
-    
-    func extractNumber(from filename: String) -> String {
-        if let range = filename.range(of: "第(\\d+)巻", options: .regularExpression),
-           let match = filename[range].range(of: "\\d+", options: .regularExpression) {
-            return String(filename[match])
-        }
-        if let range = filename.range(of: "(?:v|vol\\.?) ?(\\d+)", options: [.regularExpression, .caseInsensitive]),
-           let match = filename[range].range(of: "\\d+", options: .regularExpression) {
-            return String(filename[match])
-        }
-        if let range = filename.range(of: "\\d+", options: [.regularExpression, .backwards]) {
-            return String(filename[range])
-        }
-        return filename
+        scanVolumes()
     }
 }
 
@@ -365,17 +249,27 @@ struct SeriesDetailView: View {
 struct VolumeCover: View {
     let folderURL: URL
     let progress: Int?
+    let isRead: Bool
+    
     @State private var image: NSImage?
     @State private var loadFailed = false
     @State private var totalPages: Int = 0
     
     var body: some View {
         ZStack(alignment: .bottom) {
+            // 1. THE COVER IMAGE
             if let img = image {
-                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                    .frame(width: 150, height: 220).clipped().cornerRadius(8).shadow(radius: 2)
+                Image(nsImage: img)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 150, height: 220)
+                    .clipped()
+                    .cornerRadius(8)
+                    .shadow(radius: 2)
             } else if loadFailed {
-                RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.3)).frame(width: 150, height: 220)
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.gray.opacity(0.3))
+                    .frame(width: 150, height: 220)
                     .overlay(VStack {
                         Image(systemName: isArchive ? "doc.zipper" : "folder")
                             .font(.largeTitle).foregroundStyle(.secondary.opacity(0.5))
@@ -383,18 +277,44 @@ struct VolumeCover: View {
                             .font(.caption2).foregroundStyle(.secondary)
                     })
             } else {
-                RoundedRectangle(cornerRadius: 8).fill(Color.gray.opacity(0.2)).frame(width: 150, height: 220)
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.gray.opacity(0.2))
+                    .frame(width: 150, height: 220)
                     .overlay(ProgressView())
             }
-            if let current = progress, totalPages > 0 {
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Rectangle().fill(Color.black.opacity(0.6))
-                        Rectangle().fill(Color.accentColor)
-                            .frame(width: geo.size.width * (CGFloat(current) / CGFloat(totalPages)))
+            
+            // 2. THE PLEX BADGE (Top Right)
+            if isRead {
+                VStack {
+                    HStack {
+                        Spacer()
+                        // 🟧 THE PLEX BADGE
+                        Image(systemName: "checkmark")
+                                                    .font(.system(size: 12, weight: .bold)) // Slightly larger icon
+                                                    .foregroundColor(.white)
+                                                    .padding(8) // Larger padding = Larger box
+                                                    .background(Color.black.opacity(0.8))
+                                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                                                    // 👇 NEW: White Border
+                                                    .overlay(
+                                                        RoundedRectangle(cornerRadius: 6)
+                                                            .stroke(Color.white, lineWidth: 1.5)
+                                                    )
+                                                    .padding(6) // Margin from the edge of the cover
                     }
+                    Spacer()
                 }
-                .frame(height: 4).cornerRadius(2).padding(6)
+            } else if let prog = progress, totalPages > 0 {
+                // 3. PROGRESS BAR (Only if NOT read)
+                let percent = Double(prog) / Double(totalPages)
+                VStack {
+                    Spacer()
+                    ProgressView(value: percent)
+                        .progressViewStyle(.linear)
+                        .tint(.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 8)
+                }
             }
         }
         .onAppear { loadCover() }
@@ -451,5 +371,44 @@ struct VolumeCover: View {
                 try? fm.removeItem(at: tempDir)
             }
         } catch { DispatchQueue.main.async { self.loadFailed = true } }
+    }
+}
+
+// --- HELPER: NAME CLEANER ---
+class NameCleaner {
+    struct RenameAction { let original: URL; let newName: String }
+    
+    func analyze(volumes: [URL]) -> [RenameAction] {
+        let names = volumes.map { $0.deletingPathExtension().lastPathComponent }
+        guard let first = names.first else { return [] }
+        
+        var prefix = first
+        for name in names {
+            while !name.hasPrefix(prefix) && !prefix.isEmpty {
+                prefix.removeLast()
+            }
+        }
+        
+        if !prefix.hasSuffix(" ") && !prefix.hasSuffix("]") && !prefix.hasSuffix("-") {
+            return []
+        }
+        
+        var actions: [RenameAction] = []
+        for url in volumes {
+            let oldName = url.lastPathComponent
+            let ext = url.pathExtension
+            let nameBody = url.deletingPathExtension().lastPathComponent
+            
+            if nameBody.hasPrefix(prefix) {
+                var newBody = String(nameBody.dropFirst(prefix.count))
+                while newBody.hasPrefix(" ") || newBody.hasPrefix("-") { newBody.removeFirst() }
+                
+                let finalName = newBody + "." + ext
+                if finalName != oldName && !newBody.isEmpty {
+                    actions.append(RenameAction(original: url, newName: finalName))
+                }
+            }
+        }
+        return actions
     }
 }
