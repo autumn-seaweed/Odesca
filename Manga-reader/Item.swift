@@ -18,6 +18,13 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
+enum ReadingDirection: String, CaseIterable, Identifiable {
+    case rightToLeft = "Right to Left (Manga)"
+    case leftToRight = "Left to Right (Comic)"
+    case vertical = "Vertical (Webtoon)"
+    var id: String { self.rawValue }
+}
+
 @Model
 final class MangaSeries {
     var title: String

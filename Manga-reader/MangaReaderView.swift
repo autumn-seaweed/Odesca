@@ -9,12 +9,14 @@ import Foundation
 import SwiftUI
 import AppKit
 
-// Check if this Enum is already in MangaGrid.swift.
-enum ReadingDirection: String, CaseIterable, Identifiable {
-    case rightToLeft = "Right to Left (Manga)"
-    case leftToRight = "Left to Right (Comic)"
-    case vertical = "Vertical (Webtoon)"
-    var id: String { self.rawValue }
+// Global Cache for the Reader
+class ReaderCache {
+    static let shared = NSCache<NSURL, NSImage>()
+    static func configure() {
+        // Limit cache to 1GB of uncompressed data or 40 pages
+        shared.totalCostLimit = 1024 * 1024 * 1024
+        shared.countLimit = 40
+    }
 }
 
 struct MangaReaderView: View {
@@ -26,7 +28,7 @@ struct MangaReaderView: View {
     
     // --- STATE ---
     @State private var currentIndex = 0
-    @FocusState private var isFocused: Bool
+    @FocusState private var isFocused: Bool // Restore Focus for Arrow Keys
     @State private var pages: [URL] = []
     
     // Track if we need to cleanup a temp folder later
@@ -51,24 +53,27 @@ struct MangaReaderView: View {
                     if isTwoPageMode {
                         // --- DOUBLE PAGE MODE ---
                         if let centerPage = layout.center {
-                            PageView(url: centerPage, size: geo.size, alignment: .center)
+                            CachedPageView(url: centerPage, size: geo.size, alignment: .center)
+                                .id(centerPage) // Forces refresh on turn
                         } else {
                             HStack(spacing: 0) {
                                 let leftPage = readingDirection == .rightToLeft ? layout.left : layout.right
                                 let rightPage = readingDirection == .rightToLeft ? layout.right : layout.left
                                 
                                 if let page = leftPage {
-                                    PageView(url: page,
+                                    CachedPageView(url: page,
                                              size: CGSize(width: geo.size.width / 2, height: geo.size.height),
                                              alignment: .trailing)
+                                    .id(page)
                                 } else {
                                     Spacer().frame(width: geo.size.width / 2)
                                 }
                                 
                                 if let page = rightPage {
-                                    PageView(url: page,
+                                    CachedPageView(url: page,
                                              size: CGSize(width: geo.size.width / 2, height: geo.size.height),
                                              alignment: .leading)
+                                    .id(page)
                                 } else {
                                     Spacer().frame(width: geo.size.width / 2)
                                 }
@@ -77,7 +82,9 @@ struct MangaReaderView: View {
                     } else {
                         // --- SINGLE PAGE MODE ---
                         if pages.indices.contains(currentIndex) {
-                            PageView(url: pages[currentIndex], size: geo.size, alignment: .center)
+                            let page = pages[currentIndex]
+                            CachedPageView(url: page, size: geo.size, alignment: .center)
+                                .id(page)
                         }
                     }
                 }
@@ -112,26 +119,28 @@ struct MangaReaderView: View {
                 }
                 .padding(.bottom, 0)
             }
+            .onTapGesture { isFocused = true } // Re-focus on click
         }
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
         .onAppear {
+            ReaderCache.configure()
             loadPages()
             restoreProgress()
             isFocused = true
-            
-            // 👇 FIXED: Update the "Last Read" timestamp so it jumps to the front of the list
             manga.lastReadDate = Date()
+            prefetchWindow()
         }
         .onDisappear {
-            // Cleanup Temp Files if we opened an Archive
+            ReaderCache.shared.removeAllObjects() // Clear RAM when leaving
             if let tmp = tempArchiveFolder {
                 try? FileManager.default.removeItem(at: tmp)
             }
         }
         .onChange(of: currentIndex) { _, newIndex in
             saveProgress(page: newIndex)
+            prefetchWindow() // Shift the sliding window
         }
         // Keyboard Handlers
         .onKeyPress(.escape) {
@@ -201,6 +210,27 @@ struct MangaReaderView: View {
     }
     
     // --- LOGIC ---
+
+    func prefetchWindow() {
+        guard !pages.isEmpty else { return }
+        // 3 ahead, 1 behind
+        let start = max(0, currentIndex - 1)
+        let end = min(pages.count - 3, currentIndex + 10)
+        
+        guard start <= end else { return }
+        
+        Task.detached(priority: .userInitiated) {
+            for i in start...end {
+                let url = self.pages[i]
+                if ReaderCache.shared.object(forKey: url as NSURL) == nil {
+                    if let image = NSImage(contentsOf: url) {
+                        let cost = Int(image.size.width * image.size.height * 4)
+                        ReaderCache.shared.setObject(image, forKey: url as NSURL, cost: cost)
+                    }
+                }
+            }
+        }
+    }
     
     struct PageLayout {
         var right: URL? = nil
@@ -228,6 +258,9 @@ struct MangaReaderView: View {
     }
     
     func isWide(_ url: URL) -> Bool {
+        if let cached = ReaderCache.shared.object(forKey: url as NSURL) {
+            return cached.size.width > cached.size.height
+        }
         guard let imageRep = NSImageRep(contentsOf: url) else { return false }
         return imageRep.pixelsWide > imageRep.pixelsHigh
     }
@@ -250,36 +283,27 @@ struct MangaReaderView: View {
     }
     
     func loadArchive() {
-        // 1. Create Temp Directory
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         self.tempArchiveFolder = tempDir
         
         do {
             try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
-            
-            // 2. Unzip using macOS native tool
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            // -q: Quiet
-            // -d: Destination
             process.arguments = ["-q", volumeURL.path, "-d", tempDir.path]
-            
             try process.run()
             process.waitUntilExit()
             
-            // 3. Find Images recursively
             if let enumerator = fm.enumerator(at: tempDir, includingPropertiesForKeys: nil) {
                 var foundImages: [URL] = []
                 for case let fileURL as URL in enumerator {
                     if ["jpg", "jpeg", "png", "avif", "webp"].contains(fileURL.pathExtension.lowercased()) {
-                        // Exclude weird hidden files like __MACOSX/._image.jpg
                         if !fileURL.path.contains("__MACOSX") && !fileURL.lastPathComponent.hasPrefix(".") {
                             foundImages.append(fileURL)
                         }
                     }
                 }
-                // Sort images
                 self.pages = foundImages.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
             }
         } catch {
@@ -308,7 +332,6 @@ struct MangaReaderView: View {
         let totalPages = pages.count
         guard totalPages > 0 else { return }
         
-        // 👇 FIXED: Ensure date updates as you turn pages
         manga.lastReadDate = Date()
         
         if page >= totalPages - 1 {
@@ -347,25 +370,40 @@ struct MangaReaderView: View {
     }
 }
 
-struct PageView: View {
+// --- SYNCHRONOUS CACHED PAGE VIEW ---
+struct CachedPageView: View {
     let url: URL
     let size: CGSize
     let alignment: Alignment
+    @State private var asyncImage: NSImage?
+    
     var body: some View {
-        AsyncImage(url: url)
+        if let cached = ReaderCache.shared.object(forKey: url as NSURL) {
+            render(img: cached)
+        } else if let loaded = asyncImage {
+            render(img: loaded)
+        } else {
+            Color.black
+                .task(id: url) {
+                    self.asyncImage = nil
+                    let img = await Task.detached(priority: .userInitiated) {
+                        return NSImage(contentsOf: url)
+                    }.value
+                    
+                    if let img {
+                        let cost = Int(img.size.width * img.size.height * 4)
+                        ReaderCache.shared.setObject(img, forKey: url as NSURL, cost: cost)
+                        await MainActor.run { self.asyncImage = img }
+                    }
+                }
+        }
+    }
+    
+    func render(img: NSImage) -> some View {
+        Image(nsImage: img)
+            .resizable()
             .aspectRatio(contentMode: .fit)
             .frame(width: size.width, height: size.height, alignment: alignment)
             .clipped()
-    }
-}
-
-struct AsyncImage: View {
-    let url: URL
-    var body: some View {
-        if let nsImage = NSImage(contentsOf: url) {
-            Image(nsImage: nsImage).resizable()
-        } else {
-            Color.gray.opacity(0.1)
-        }
     }
 }
