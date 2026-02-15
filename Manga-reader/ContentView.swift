@@ -12,17 +12,19 @@ struct ContentView: View {
     @Environment(\.modelContext) var modelContext
     @StateObject private var scanner = LibraryScanner()
     
-    // NEW: Navigation Path for programmatic navigation
     @State private var navPath = NavigationPath()
-    
     @State private var sortOrder = SortDescriptor(\MangaSeries.dateModified, order: .reverse)
     @State private var searchText = ""
     @State private var currentFilter: LibraryFilter = .all
     
+    // 👇 QUERY: Fetch items to determine "Recently Read"
+    @Query(sort: \MangaSeries.dateModified, order: .reverse)
+    private var allManga: [MangaSeries]
+    
     var body: some View {
         NavigationStack(path: $navPath) {
             VStack(spacing: 0) {
-                // --- CUSTOM HEADER ---
+                // --- HEADER ---
                 VStack(spacing: 12) {
                     HStack {
                         Picker("Filter", selection: $currentFilter) {
@@ -51,10 +53,17 @@ struct ContentView: View {
                 .background(.ultraThinMaterial)
                 
                 // --- MAIN CONTENT ---
-                // 👇 FIXED: Removed 'ScrollView { ... }' wrapper.
-                // MangaGrid already has its own ScrollView.
-                MangaGrid(sort: sortOrder, searchString: searchText, filter: currentFilter, navPath: $navPath)
-                    .padding(.top, 10)
+                // Filter specifically for items with reading progress
+                let recentItems = allManga.filter { !$0.readingProgress.isEmpty }
+                
+                // Pass recents ONLY if we are in the default view (no search, no filter)
+                MangaGrid(
+                    sort: sortOrder,
+                    searchString: searchText,
+                    filter: currentFilter,
+                    navPath: $navPath,
+                    recents: (searchText.isEmpty && currentFilter == .all) ? Array(recentItems.prefix(10)) : []
+                )
             }
             .navigationTitle("Library")
             .navigationDestination(for: PersistentIdentifier.self) { id in
@@ -72,7 +81,6 @@ struct ContentView: View {
                     NovelReaderView(volumeURL: dest.url, manga: manga)
                 }
             }
-            
             .searchable(text: $searchText, prompt: "Search manga...")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {

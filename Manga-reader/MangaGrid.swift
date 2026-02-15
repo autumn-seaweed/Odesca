@@ -9,7 +9,7 @@ import SwiftUI
 import SwiftData
 import AppKit
 
-// --- 1. THE SNAPSHOT (Lightweight Data) ---
+// --- 1. THE SNAPSHOT ---
 struct MangaDisplayItem: Identifiable, Equatable {
     let id: PersistentIdentifier
     let title: String
@@ -20,10 +20,7 @@ struct MangaDisplayItem: Identifiable, Equatable {
     let volumeCount: Int
     let readCount: Int
     
-    // image caching for NAS
-    var cacheID: String {
-        return String(id.hashValue)
-    }
+    var cacheID: String { String(id.hashValue) }
     
     init(manga: MangaSeries) {
         self.id = manga.persistentModelID
@@ -52,10 +49,9 @@ struct MangaGrid: View {
     @Query var library: [MangaSeries]
     @Binding var navPath: NavigationPath
     
-    // NAS state
-    @State private var refreshID = UUID()
+    let recents: [MangaSeries]
     
-    // States
+    @State private var refreshID = UUID()
     @State private var selectedIds = Set<PersistentIdentifier>()
     @State private var renamingManga: MangaSeries?
     @State private var newName: String = ""
@@ -65,16 +61,18 @@ struct MangaGrid: View {
     
     let searchString: String
     let filter: LibraryFilter
-    let columns = [GridItem(.adaptive(minimum: 160, maximum: 200))]
     
-    init(sort: SortDescriptor<MangaSeries>, searchString: String, filter: LibraryFilter, navPath: Binding<NavigationPath>) {
+    // Grid Layout: Fixed spacing prevents "touching"
+    let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 20)]
+    
+    init(sort: SortDescriptor<MangaSeries>, searchString: String, filter: LibraryFilter, navPath: Binding<NavigationPath>, recents: [MangaSeries]) {
         self.searchString = searchString
         self.filter = filter
         self._navPath = navPath
+        self.recents = recents
         _library = Query(sort: [sort], animation: .default)
     }
 
-    // Filter Logic
     var filteredLibrary: [MangaSeries] {
         library.filter { manga in
             let matchesFilter: Bool
@@ -89,12 +87,10 @@ struct MangaGrid: View {
         }
     }
     
-    // THE OPTIMIZATION: Convert Heavy DB Objects -> Lightweight Snapshots
     var displayItems: [MangaDisplayItem] {
         filteredLibrary.map { MangaDisplayItem(manga: $0) }
     }
 
-    // --- MAIN BODY (Refactored for Compiler Performance) ---
     var body: some View {
         Group {
             if library.isEmpty {
@@ -119,8 +115,6 @@ struct MangaGrid: View {
         }
     }
     
-    // --- SUBVIEWS (Extracted) ---
-    
     var emptyLibraryView: some View {
         ContentUnavailableView {
             Label("No Manga Found", systemImage: "books.vertical")
@@ -137,29 +131,57 @@ struct MangaGrid: View {
     
     var mangaLibraryGrid: some View {
         ScrollView {
-            LazyVGrid(columns: columns, spacing: 20) {
-                // Loop over Snapshots, NOT database objects
-                ForEach(displayItems) { item in
-                    MangaGridItem(
-                        item: item,
-                        isSelected: selectedIds.contains(item.id),
-                        onSelect: { handleSelection(id: item.id) },
-                        onOpen: { openManga(id: item.id) }
-                    )
-                    .equatable()
-                    // FIX: Unique ID per item + Refresh Signal
-                    .id(item.cacheID + "-" + refreshID.uuidString)
-                    .contextMenu {
-                        if let realManga = library.first(where: { $0.persistentModelID == item.id }) {
-                            contextMenuButtons(for: realManga, item: item)
+            VStack(alignment: .leading, spacing: 20) {
+                
+                // RECENTLY READ SHELF
+                if !recents.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Recently Read")
+                            .font(.title3)
+                            .bold()
+                            .padding(.horizontal)
+                            .padding(.top, 10)
+                        
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 15) {
+                                ForEach(recents) { manga in
+                                    RecentCard(manga: manga)
+                                        .onTapGesture {
+                                            navPath.append(manga.persistentModelID)
+                                        }
+                                }
+                            }
+                            .padding(.horizontal)
+                            .padding(.bottom, 5)
+                        }
+                        Divider().padding(.horizontal)
+                    }
+                }
+                
+                // MAIN GRID
+                LazyVGrid(columns: columns, spacing: 30) {
+                    ForEach(displayItems) { item in
+                        MangaGridItem(
+                            item: item,
+                            isSelected: selectedIds.contains(item.id),
+                            onSelect: { handleSelection(id: item.id) },
+                            onOpen: { openManga(id: item.id) }
+                        )
+                        .equatable()
+                        .id(item.cacheID + "-" + refreshID.uuidString)
+                        .contextMenu {
+                            if let realManga = library.first(where: { $0.persistentModelID == item.id }) {
+                                contextMenuButtons(for: realManga, item: item)
+                            }
                         }
                     }
                 }
+                .padding(.horizontal)
+                .padding(.bottom, 40)
             }
-            .padding()
         }
         .focusable()
-        .focusEffectDisabled() // 👈 NEW: Disables the blue "halo" ring around the window
+        .focusEffectDisabled()
         .onKeyPress(.delete) {
             let targets = library.filter { selectedIds.contains($0.persistentModelID) }
             if !targets.isEmpty { confirmDelete(targets: targets) }
@@ -189,35 +211,23 @@ struct MangaGrid: View {
     
     func contextMenuButtons(for manga: MangaSeries, item: MangaDisplayItem) -> some View {
         let targets = selectedIds.contains(manga.persistentModelID) ? library.filter { selectedIds.contains($0.persistentModelID) } : [manga]
-        
         let allToRead = targets.allSatisfy { $0.tags.contains("To Read") }
         let allFavorites = targets.allSatisfy { $0.isFavorite }
         
         return Group {
             Text("\(targets.count) Selected")
-            
-            // Toggle "To Read"
             if allToRead {
                 Button { batchSetTag("To Read", targets: targets, active: false) } label: { Label("Remove 'To Read'", systemImage: "eyeglasses") }
             } else {
                 Button { batchSetTag("To Read", targets: targets, active: true) } label: { Label("Add 'To Read'", systemImage: "eyeglasses") }
             }
-            
-            // Toggle Favorites
             if allFavorites {
                 Button { batchSetFavorite(targets: targets, active: false) } label: { Label("Unfavorite", systemImage: "star.slash") }
             } else {
                 Button { batchSetFavorite(targets: targets, active: true) } label: { Label("Favorite", systemImage: "star") }
             }
-            
-            // Refresh Button for refreshing covers
             Divider()
-            Button {
-                forceRefreshCover(for: item)
-            } label: {
-                Label("Refresh Cover", systemImage: "arrow.clockwise")
-            }
-            
+            Button { forceRefreshCover(for: item) } label: { Label("Refresh Cover", systemImage: "arrow.clockwise") }
             Divider()
             Button { batchMarkRead(targets: targets, read: true) } label: { Label("Mark Read", systemImage: "checkmark.circle") }
             Button { batchMarkRead(targets: targets, read: false) } label: { Label("Mark Unread", systemImage: "circle") }
@@ -274,15 +284,9 @@ struct MangaGrid: View {
         }
     }
     
-    // force cover refresh
     func forceRefreshCover(for item: MangaDisplayItem) {
-        // 1. Delete from RAM so the app forgets the old image
         ThumbnailCache.shared.removeObject(forKey: item.folderURL.path as NSString)
-        
-        // 2. Delete from Disk so the app doesn't just reload the old one on restart
         CoverCache.shared.delete(for: item.cacheID)
-        
-        // 3. Trigger View Update so the grid actually visually refreshes
         refreshID = UUID()
     }
     
@@ -301,7 +305,6 @@ struct MangaGrid: View {
     }
     
     func performRename(_ manga: MangaSeries, to name: String) {
-        // 1. Basic safety checks
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         guard name != manga.title else { return }
 
@@ -313,17 +316,39 @@ struct MangaGrid: View {
             try fm.moveItem(at: oldURL, to: newURL)
             manga.title = name
             manga.folderURL = newURL
-            
-            // 2. Explicitly save so the UI updates immediately
             try? modelContext.save()
-            print("✅ Renamed to \(name)")
         } catch {
             print("❌ Rename failed: \(error)")
         }
     }
 }
 
-// --- 4. ASYNC COVER (Disk + RAM + Network/NAS Optimized) ---
+// --- 4. RECENT ITEM CARD (Fixed Dimensions) ---
+struct RecentCard: View {
+    let manga: MangaSeries
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8).fill(Color.clear).frame(width: 120, height: 170)
+                AsyncMangaCover(item: MangaDisplayItem(manga: manga))
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .shadow(radius: 2)
+            
+            Text(manga.title)
+                .font(.caption)
+                .bold()
+                .lineLimit(2)
+                .frame(width: 120, alignment: .leading)
+                .multilineTextAlignment(.leading)
+        }
+        .contentShape(Rectangle())
+        .onHover { _ in NSCursor.pointingHand.push() }
+    }
+}
+
+// --- 5. ASYNC COVER (Reused) ---
 struct AsyncMangaCover: View {
     let item: MangaDisplayItem
     
@@ -333,13 +358,20 @@ struct AsyncMangaCover: View {
     var body: some View {
         Group {
             if let img = image {
-                Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
-                    .frame(width: 160, height: 220).clipped().cornerRadius(10).shadow(radius: 3)
+                GeometryReader { geo in
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                        .clipped()
+                }
             } else if loadFailed {
-                RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.3)).frame(width: 160, height: 220)
-                    .overlay(Image(systemName: "photo.badge.exclamationmark").foregroundStyle(.secondary))
+                ZStack {
+                    Color.gray.opacity(0.3)
+                    Image(systemName: "photo.badge.exclamationmark").foregroundStyle(.secondary)
+                }
             } else {
-                RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.2)).frame(width: 160, height: 220)
+                Color.gray.opacity(0.2)
             }
         }
         .task(id: item) { await loadCover() }
@@ -368,7 +400,6 @@ struct AsyncMangaCover: View {
                 if depth > 2 { return nil }
                 guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey]) else { return nil }
                 
-                // 1. Look for loose images first
                 let images = items.filter { ["jpg", "png", "jpeg", "webp", "avif"].contains($0.pathExtension.lowercased()) }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
                 
@@ -377,24 +408,19 @@ struct AsyncMangaCover: View {
                     if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts) { return NSImage(cgImage: cg, size: .zero) }
                 }
                 
-                // 2. Look for archives (EPUB, ZIP, CBZ) and peek inside
                 let archives = items.filter { ["epub", "zip", "cbz"].contains($0.pathExtension.lowercased()) }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-                
                 for archiveURL in archives {
                     if let img = extractFirstImageFromArchive(url: archiveURL) { return img }
                 }
                 
-                // 3. Recurse into subfolders
                 let folders = items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-                
                 for folder in folders {
                     if let img = findImage(in: folder, depth: depth + 1) { return img }
                 }
                 return nil
             }
-            
             return findImage(in: item.folderURL, depth: 0)
         }.value
         
@@ -407,34 +433,20 @@ struct AsyncMangaCover: View {
         }
     }
 
-    // Helper to peek inside an EPUB/ZIP without fully unzipping it
     func extractFirstImageFromArchive(url: URL) -> NSImage? {
         let fm = FileManager.default
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? fm.removeItem(at: tempDir) }
-        
         do {
             try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            // -q: quiet, -j: junk paths (flat folder), -n: don't overwrite
             process.arguments = ["-q", "-j", url.path, "*.jpg", "*.jpeg", "*.png", "*.webp", "-d", tempDir.path]
-            
-            let pipe = Pipe()
-            process.standardError = pipe // Catch errors if any
-            
-            try process.run()
-            process.waitUntilExit()
-            
+            try process.run(); process.waitUntilExit()
             let items = (try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)) ?? []
             let sortedImages = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-            
-            if let first = sortedImages.first, let img = NSImage(contentsOf: first) {
-                return img
-            }
-        } catch {
-            return nil
-        }
+            if let first = sortedImages.first, let img = NSImage(contentsOf: first) { return img }
+        } catch { return nil }
         return nil
     }
 }

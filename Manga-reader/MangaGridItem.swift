@@ -19,13 +19,27 @@ struct MangaGridItem: View, Equatable {
     }
     
     var body: some View {
-        VStack {
-            AsyncMangaCover(item: item)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
-                )
+        VStack(spacing: 8) {
+            // 👇 THE FIX: Use a rigid container for layout, put image in overlay
+            ZStack {
+                // 1. The Layout Frame (Transparent, rigid)
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.clear)
+                    .frame(height: 230) // Strict Height
+                
+                // 2. The Content (Flexible, Clipped)
+                AsyncMangaCover(item: item)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 2)
+            }
+            // 3. Selection Border (On top of everything)
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(isSelected ? Color.accentColor : Color.white.opacity(0.1), lineWidth: isSelected ? 3 : 1)
+            )
+            .contentShape(Rectangle()) // Ensure empty areas are clickable
             
+            // Info Text
             VStack(spacing: 2) {
                 HStack(spacing: 4) {
                     if item.isFavorite {
@@ -37,6 +51,7 @@ struct MangaGridItem: View, Equatable {
                     Text(item.title)
                         .font(.caption).bold()
                         .lineLimit(1)
+                        .truncationMode(.tail)
                         .background(isSelected ? Color.accentColor.opacity(0.3) : Color.clear)
                         .cornerRadius(4)
                 }
@@ -46,7 +61,6 @@ struct MangaGridItem: View, Equatable {
                     .foregroundStyle(item.isFinished ? .green : .secondary)
             }
         }
-        .contentShape(Rectangle())
         .onTapGesture(count: 2) { onOpen() }
         .simultaneousGesture(TapGesture().onEnded { onSelect() })
     }
