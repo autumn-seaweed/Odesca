@@ -336,27 +336,22 @@ struct AsyncMangaCover: View {
                 Image(nsImage: img).resizable().aspectRatio(contentMode: .fill)
                     .frame(width: 160, height: 220).clipped().cornerRadius(10).shadow(radius: 3)
             } else if loadFailed {
-                // Failure placeholder
                 RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.3)).frame(width: 160, height: 220)
                     .overlay(Image(systemName: "photo.badge.exclamationmark").foregroundStyle(.secondary))
             } else {
-                // Loading placeholder
                 RoundedRectangle(cornerRadius: 10).fill(Color.gray.opacity(0.2)).frame(width: 160, height: 220)
             }
         }
-        // 👇 UPDATE: Use 'item' so cover updates if Title/URL changes
         .task(id: item) { await loadCover() }
     }
     
     func loadCover() async {
-        // 1. RAM CACHE (Fastest - Instant)
         let ramKey = item.folderURL.path as NSString
         if let cached = ThumbnailCache.shared.object(forKey: ramKey) {
             self.image = cached
             return
         }
         
-        // 2. DISK CACHE (Fast - Survives Restart)
         if let diskImage = await Task.detached(priority: .userInitiated, operation: {
             CoverCache.shared.load(for: item.cacheID)
         }).value {
@@ -365,17 +360,15 @@ struct AsyncMangaCover: View {
             return
         }
         
-        // 3. GENERATE (Slow - Network/NAS Access)
         let loadedImage = await Task.detached(priority: .background) { () -> NSImage? in
             if Task.isCancelled { return nil }
             let fm = FileManager.default
             
-            // Recursive Finder: Looks for the first image it can find
             func findImage(in dir: URL, depth: Int) -> NSImage? {
                 if depth > 2 { return nil }
-                guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return nil }
+                guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey]) else { return nil }
                 
-                // Images (Naturally Sorted)
+                // 1. Look for loose images first
                 let images = items.filter { ["jpg", "png", "jpeg", "webp", "avif"].contains($0.pathExtension.lowercased()) }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
                 
@@ -384,7 +377,15 @@ struct AsyncMangaCover: View {
                     if let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts) { return NSImage(cgImage: cg, size: .zero) }
                 }
                 
-                // Subfolders
+                // 2. Look for archives (EPUB, ZIP, CBZ) and peek inside
+                let archives = items.filter { ["epub", "zip", "cbz"].contains($0.pathExtension.lowercased()) }
+                    .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+                
+                for archiveURL in archives {
+                    if let img = extractFirstImageFromArchive(url: archiveURL) { return img }
+                }
+                
+                // 3. Recurse into subfolders
                 let folders = items.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
                     .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
                 
@@ -393,16 +394,47 @@ struct AsyncMangaCover: View {
                 }
                 return nil
             }
+            
             return findImage(in: item.folderURL, depth: 0)
         }.value
         
-        // 4. SAVE RESULT
         if let img = loadedImage {
-            ThumbnailCache.shared.setObject(img, forKey: ramKey)     // RAM
-            CoverCache.shared.save(image: img, for: item.cacheID)    // Disk
+            ThumbnailCache.shared.setObject(img, forKey: ramKey)
+            CoverCache.shared.save(image: img, for: item.cacheID)
             self.image = img
         } else {
             self.loadFailed = true
         }
+    }
+
+    // Helper to peek inside an EPUB/ZIP without fully unzipping it
+    func extractFirstImageFromArchive(url: URL) -> NSImage? {
+        let fm = FileManager.default
+        let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: tempDir) }
+        
+        do {
+            try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+            // -q: quiet, -j: junk paths (flat folder), -n: don't overwrite
+            process.arguments = ["-q", "-j", url.path, "*.jpg", "*.jpeg", "*.png", "*.webp", "-d", tempDir.path]
+            
+            let pipe = Pipe()
+            process.standardError = pipe // Catch errors if any
+            
+            try process.run()
+            process.waitUntilExit()
+            
+            let items = (try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)) ?? []
+            let sortedImages = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            
+            if let first = sortedImages.first, let img = NSImage(contentsOf: first) {
+                return img
+            }
+        } catch {
+            return nil
+        }
+        return nil
     }
 }
