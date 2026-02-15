@@ -20,13 +20,7 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
 
 @Model
 final class MangaSeries {
-    // --------------------------------------------------------
-    // ✅ SAFE RENAMING EXAMPLE
-    // If you ever want to rename 'title', do it like this:
-    // @Attribute(originalName: "title") var seriesName: String
-    // --------------------------------------------------------
     var title: String
-    
     var folderURL: URL
     var lastPageRead: Int
     var isFinished: Bool
@@ -34,20 +28,15 @@ final class MangaSeries {
     var tags: [String] = []
     var dateAdded: Date
     
-    // --------------------------------------------------------
-    // ✅ ROBUST ADDITIONS
-    // These have default values assigned (= ...).
-    // This means if you load an OLD database that doesn't have
-    // these fields, SwiftData will fill them in automatically
-    // instead of crashing.
-    // --------------------------------------------------------
+    // Tracks file system changes (Scanner)
     var dateModified: Date = Date()
+    
+    // 👇 NEW: Tracks when YOU last opened the series
+    var lastReadDate: Date = Date.distantPast
+    
     var volumeCount: Int = 0
     var isFavorite: Bool = false
     var readingProgress: [String: Int] = [:]
-    
-    // Example: If you wanted to add a 'rating' later, you would add:
-    // var rating: Int = 0
     
     init(title: String, folderURL: URL) {
         self.title = title
@@ -57,29 +46,25 @@ final class MangaSeries {
         self.readVolumes = []
         self.tags = []
         self.dateAdded = Date()
-        
-        // Always initialize new properties here too
         self.dateModified = Date()
+        self.lastReadDate = Date.distantPast
         self.volumeCount = 0
         self.isFavorite = false
         self.readingProgress = [:]
     }
 }
 
-// --- HELPER LOGIC (Extensions) ---
+// --- HELPER LOGIC ---
 extension MangaSeries {
     var coverImage: NSImage? {
-        // Secure access is required for Sandbox apps
         _ = folderURL.startAccessingSecurityScopedResource()
         defer { folderURL.stopAccessingSecurityScopedResource() }
         
         let fm = FileManager.default
         let validExts = ["jpg", "jpeg", "png", "avif", "webp"]
         
-        // 1. Check Root Folder
         if let img = findImage(in: folderURL, fm: fm, exts: validExts) { return img }
         
-        // 2. Check Subfolders (Volume 1, etc.)
         guard let subfolders = try? fm.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)
             .filter({ (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true })
             .sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending })
@@ -96,7 +81,6 @@ extension MangaSeries {
         let images = items.filter { exts.contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         
-        // Attempt to load the first image found
         if let first = images.first, let data = try? Data(contentsOf: first) {
             return NSImage(data: data)
         }

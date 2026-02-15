@@ -1,5 +1,5 @@
 //
-//  NovelReader.swift
+//  NovelReaderView.swift
 //  Manga-reader
 //
 //  Created by Aki Toyoshima on 2026/02/15.
@@ -9,8 +9,6 @@ import SwiftUI
 import WebKit
 import SwiftData
 
-// --- NAVIGATION DATA ---
-// Definition stays here as the single source of truth for the app
 struct NovelDestination: Hashable {
     let url: URL
     let mangaID: PersistentIdentifier
@@ -19,10 +17,9 @@ struct NovelDestination: Hashable {
 enum NovelTheme: String, CaseIterable, Identifiable {
     case dark = "Dark", light = "Light", sepia = "Sepia"
     var id: String { self.rawValue }
-    
     var colors: (bg: String, text: String) {
         switch self {
-        case .dark:  return ("#1a1a1a", "#e0e0e0")
+        case .dark: return ("#1a1a1a", "#e0e0e0")
         case .light: return ("#ffffff", "#000000")
         case .sepia: return ("#f4ecd8", "#5b4636")
         }
@@ -34,12 +31,10 @@ enum TextDirection: String, CaseIterable, Identifiable {
     var id: String { self.rawValue }
 }
 
-// --- PARSER ENGINE ---
 class EpubEngine {
     static func resolveChapters(in root: URL) -> [URL] {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
-        
         let opfURL = enumerator.compactMap { $0 as? URL }.first { $0.pathExtension.lowercased() == "opf" }
         guard let opf = opfURL, let content = try? String(contentsOf: opf) else { return [] }
         let baseDir = opf.deletingLastPathComponent()
@@ -52,20 +47,15 @@ class EpubEngine {
                 manifest[String(content[id])] = String(content[href]).removingPercentEncoding
             }
         }
-        
         var spine: [String] = []
         let spineRegex = try? NSRegularExpression(pattern: #"<itemref\s+[^>]*idref=["']([^"']+)["'][^>]*/>"#, options: .caseInsensitive)
         spineRegex?.enumerateMatches(in: content, range: NSRange(content.startIndex..., in: content)) { m, _, _ in
-            if let idR = m?.range(at: 1), let id = Range(idR, in: content) {
-                spine.append(String(content[id]))
-            }
+            if let idR = m?.range(at: 1), let id = Range(idR, in: content) { spine.append(String(content[id])) }
         }
-        
         return spine.compactMap { manifest[$0] }.map { baseDir.appendingPathComponent($0) }
     }
 }
 
-// --- MAIN READER VIEW ---
 struct NovelReaderView: View {
     let volumeURL: URL
     @Bindable var manga: MangaSeries
@@ -126,7 +116,11 @@ struct NovelReaderView: View {
                 } label: { Label("Text Settings", systemImage: "textformat") }
             }
         }
-        .onAppear { setupBook() }
+        .onAppear {
+            setupBook()
+            // 👇 UPDATE LAST READ DATE
+            manga.lastReadDate = Date()
+        }
         .onDisappear { if let dir = bookCacheDir { try? FileManager.default.removeItem(at: dir) } }
         .onChange(of: fontSize) { _, _ in renderCurrentChapter() }
         .onChange(of: theme) { _, _ in renderCurrentChapter() }
@@ -162,6 +156,7 @@ struct NovelReaderView: View {
     private func changeChapter(by delta: Int) {
         currentChapterIndex += delta
         manga.readingProgress[volumeURL.lastPathComponent] = currentChapterIndex
+        manga.lastReadDate = Date() // Also update on chapter change
         renderCurrentChapter()
     }
 
@@ -176,24 +171,19 @@ struct NovelReaderView: View {
                let end = content.range(of: "</body>", options: .caseInsensitive) {
                 body = String(content[start.lowerBound..<end.upperBound]) + "</body>"
             }
-            
             let writingMode = direction == .vertical ? "vertical-rl" : "horizontal-tb"
-            
             let html = """
             <!DOCTYPE html>
             <html>
             <head>
                 <meta charset="UTF-8">
                 <style>
-                    /* 1. Global Reset */
                     html, body, div, span, p {
                         writing-mode: \(writingMode) !important;
                         -webkit-writing-mode: \(writingMode) !important;
                         color: inherit !important;
                         background-color: transparent !important;
                     }
-                    
-                    /* 2. Layout Core */
                     :root { --bg: \(theme.colors.bg); --text: \(theme.colors.text); }
                     html, body { 
                         background-color: var(--bg) !important; 
@@ -201,7 +191,6 @@ struct NovelReaderView: View {
                         margin: 0; padding: 0; height: 100vh;
                         \(direction == .vertical ? "overflow-x: scroll; overflow-y: hidden;" : "overflow-y: scroll;") 
                     }
-                    
                     body {
                         font-family: "Hiragino Mincho ProN", serif; 
                         font-size: \(Int(fontSize))px; 
@@ -210,7 +199,6 @@ struct NovelReaderView: View {
                         box-sizing: border-box;
                         \(direction == .horizontal ? "max-width: 800px; margin: 0 auto;" : "")
                     }
-                    
                     img { max-height: 85vh; width: auto; display: block; margin: 2em auto; }
                 </style>
             </head>
@@ -224,14 +212,9 @@ struct NovelReaderView: View {
                         window.scrollTo({ left: 0, behavior: 'instant' });
                     }
                 }
-
-                // Initial Load
                 window.onload = forceAlign;
-
-                // ⚡️ Link-Click/Jump Fix
                 window.onhashchange = function() {
                     forceAlign();
-                    // Double-check after a tiny delay for slow rendering
                     setTimeout(forceAlign, 50);
                 };
             </script>
@@ -249,7 +232,6 @@ struct NovelReaderView: View {
     }
 }
 
-// --- WEBVIEW ---
 struct NovelWebView: NSViewRepresentable {
     let fileURL: URL?
     let readAccessDir: URL?
@@ -271,7 +253,6 @@ struct NovelWebView: NSViewRepresentable {
     }
 }
 
-// --- COLOR HELPER ---
 extension Color {
     init(hex: String) {
         let hex = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)

@@ -17,9 +17,9 @@ struct ContentView: View {
     @State private var searchText = ""
     @State private var currentFilter: LibraryFilter = .all
     
-    // 👇 QUERY: Fetch items to determine "Recently Read"
-    @Query(sort: \MangaSeries.dateModified, order: .reverse)
-    private var allManga: [MangaSeries]
+    // 👇 NEW QUERY: Sort by lastReadDate so we get the most recently opened items first
+    @Query(sort: \MangaSeries.lastReadDate, order: .reverse)
+    private var recentlyReadManga: [MangaSeries]
     
     var body: some View {
         NavigationStack(path: $navPath) {
@@ -53,16 +53,16 @@ struct ContentView: View {
                 .background(.ultraThinMaterial)
                 
                 // --- MAIN CONTENT ---
-                // Filter specifically for items with reading progress
-                let recentItems = allManga.filter { !$0.readingProgress.isEmpty }
+                // Filter: Only show items that have a valid lastReadDate
+                let recents = recentlyReadManga.filter { $0.lastReadDate > Date.distantPast }
                 
-                // Pass recents ONLY if we are in the default view (no search, no filter)
                 MangaGrid(
                     sort: sortOrder,
                     searchString: searchText,
                     filter: currentFilter,
                     navPath: $navPath,
-                    recents: (searchText.isEmpty && currentFilter == .all) ? Array(recentItems.prefix(10)) : []
+                    // Pass the list sorted by "Last Opened"
+                    recents: (searchText.isEmpty && currentFilter == .all) ? Array(recents.prefix(10)) : []
                 )
             }
             .navigationTitle("Library")
