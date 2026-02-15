@@ -67,6 +67,12 @@ struct ContentView: View {
                     MangaReaderView(volumeURL: dest.volumeURL, manga: manga)
                 }
             }
+            .navigationDestination(for: NovelDestination.self) { dest in
+                if let manga = modelContext.model(for: dest.mangaID) as? MangaSeries {
+                    NovelReaderView(volumeURL: dest.url, manga: manga)
+                }
+            }
+            
             .searchable(text: $searchText, prompt: "Search manga...")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
