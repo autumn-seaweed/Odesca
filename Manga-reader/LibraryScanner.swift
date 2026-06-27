@@ -94,8 +94,10 @@ class LibraryScanner: ObservableObject {
                         print("🔄 Updated: \(folderName)")
                     }
                     
-                    // Sanitize Read History
-                    let cleanedReadVolumes = existing.readVolumes.filter { validNamesSet.contains($0) }
+                    // Sanitize Read History — but only top-level volume names.
+                    // Nested keys ("Sub-series/Volume") belong to sub-series we
+                    // don't scan here, so leave them untouched rather than wiping them.
+                    let cleanedReadVolumes = existing.readVolumes.filter { $0.contains("/") || validNamesSet.contains($0) }
                     if cleanedReadVolumes.count != existing.readVolumes.count {
                         existing.readVolumes = cleanedReadVolumes
                     }

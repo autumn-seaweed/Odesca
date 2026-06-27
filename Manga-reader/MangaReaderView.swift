@@ -438,10 +438,30 @@ struct MangaReaderView: View {
     
     func loadDirectory(_ dir: URL) {
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
-        self.pages = items
-            .filter { ["jpg", "jpeg", "png", "avif", "webp"].contains($0.pathExtension.lowercased()) }
-            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        let exts: Set<String> = ["jpg", "jpeg", "png", "avif", "webp"]
+
+        // Fast path: loose images directly in the folder (the common case).
+        let top = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
+        let looseImages = top.filter { exts.contains($0.pathExtension.lowercased()) }
+        if !looseImages.isEmpty {
+            self.pages = looseImages.sorted {
+                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+            }
+            return
+        }
+
+        // Otherwise recurse: a volume whose pages live in chapter subfolders.
+        // Sorting by full path keeps chapters — and pages within them — in order.
+        var found: [URL] = []
+        if let enumerator = fm.enumerator(at: dir, includingPropertiesForKeys: nil) {
+            for case let fileURL as URL in enumerator {
+                guard exts.contains(fileURL.pathExtension.lowercased()),
+                      !fileURL.lastPathComponent.hasPrefix("."),
+                      !fileURL.path.contains("__MACOSX") else { continue }
+                found.append(fileURL)
+            }
+        }
+        self.pages = found.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
     }
     
     func loadArchive() {
@@ -503,7 +523,7 @@ struct MangaReaderView: View {
     }
 
     func persistProgress(page: Int) {
-        let volName = volumeURL.lastPathComponent
+        let volName = manga.volumeKey(for: volumeURL)
         let totalPages = pages.count
         guard totalPages > 0 else { return }
 
@@ -520,7 +540,7 @@ struct MangaReaderView: View {
     }
     
     func restoreProgress() {
-        let volName = volumeURL.lastPathComponent
+        let volName = manga.volumeKey(for: volumeURL)
         guard let savedPage = manga.readingProgress[volName] else { return }
         
         let totalPages = pages.count
@@ -536,10 +556,10 @@ struct MangaReaderView: View {
         }
     }
     
-    var isVolumeRead: Bool { manga.readVolumes.contains(volumeURL.lastPathComponent) }
-    
+    var isVolumeRead: Bool { manga.readVolumes.contains(manga.volumeKey(for: volumeURL)) }
+
     func markAsRead() {
-        let name = volumeURL.lastPathComponent
+        let name = manga.volumeKey(for: volumeURL)
         if isVolumeRead { manga.readVolumes.removeAll { $0 == name } }
         else { manga.readVolumes.append(name) }
     }

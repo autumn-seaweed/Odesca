@@ -76,6 +76,11 @@ struct ContentView: View {
                     MangaReaderView(volumeURL: dest.volumeURL, manga: manga)
                 }
             }
+            .navigationDestination(for: SubSeriesDestination.self) { dest in
+                if let manga = modelContext.model(for: dest.mangaID) as? MangaSeries {
+                    SeriesDetailView(manga: manga, folderOverride: dest.folderURL, navPath: $navPath)
+                }
+            }
             .navigationDestination(for: NovelDestination.self) { dest in
                 if let manga = modelContext.model(for: dest.mangaID) as? MangaSeries {
                     NovelReaderView(volumeURL: dest.url, manga: manga)

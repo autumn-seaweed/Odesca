@@ -63,6 +63,20 @@ final class MangaSeries {
 
 // --- HELPER LOGIC ---
 extension MangaSeries {
+    /// A stable key for a volume's read/progress state, expressed relative to the
+    /// series root. For a top-level volume this is just the folder name (so it
+    /// matches data saved before sub-series existed); for a volume inside a
+    /// sub-series it's the path from the root, e.g. "Spin-offs/Volume 1", which
+    /// keeps same-named volumes in different sub-series from colliding.
+    func volumeKey(for url: URL) -> String {
+        let root = folderURL.pathComponents
+        let comps = url.pathComponents
+        if comps.count > root.count, Array(comps.prefix(root.count)) == root {
+            return comps.dropFirst(root.count).joined(separator: "/")
+        }
+        return url.lastPathComponent
+    }
+
     var coverImage: NSImage? {
         _ = folderURL.startAccessingSecurityScopedResource()
         defer { folderURL.stopAccessingSecurityScopedResource() }
@@ -98,4 +112,52 @@ extension MangaSeries {
 struct VolumeDestination: Hashable {
     let volumeURL: URL
     let mangaID: PersistentIdentifier
+}
+
+// Navigating into a sub-series: a folder under the series that groups further
+// volumes (or further sub-series) rather than containing pages itself.
+struct SubSeriesDestination: Hashable {
+    let folderURL: URL
+    let mangaID: PersistentIdentifier
+}
+
+// How a folder under a series should be treated when opened.
+enum FolderKind {
+    case volume     // contains pages — open in the reader
+    case subSeries  // contains only subfolders/archives — drill in
+    case empty
+}
+
+/// Auto-detect by content: a folder with images (or archives) directly inside is
+/// a readable volume; a folder containing only subfolders is a sub-series to drill
+/// into. (A chaptered volume — subfolders of images — reads as a sub-series of
+/// chapters; use "Open as Single Volume" to merge it instead.)
+func classifyFolder(_ url: URL) -> FolderKind {
+    let fm = FileManager.default
+    let imageExts: Set<String> = ["jpg", "jpeg", "png", "avif", "webp"]
+    let archiveExts: Set<String> = ["epub", "zip", "cbz"]
+
+    guard let items = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+        return .empty
+    }
+
+    var hasImages = false
+    var hasArchives = false
+    var hasSubfolders = false
+
+    for item in items {
+        if item.lastPathComponent.hasPrefix(".") { continue }
+        let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        if isDir {
+            hasSubfolders = true
+        } else {
+            let ext = item.pathExtension.lowercased()
+            if imageExts.contains(ext) { hasImages = true }
+            else if archiveExts.contains(ext) { hasArchives = true }
+        }
+    }
+
+    if hasImages { return .volume }
+    if hasArchives || hasSubfolders { return .subSeries }
+    return .empty
 }

@@ -16,12 +16,19 @@ class PageCountCache {
 
 struct SeriesDetailView: View {
     @Bindable var manga: MangaSeries
+    // When set, this view is showing a sub-series folder *inside* `manga` rather
+    // than the series root. Read/progress state still lives on `manga`.
+    var folderOverride: URL? = nil
     @Binding var navPath: NavigationPath
-    
+
     @Environment(\.dismiss) var dismiss
     @Environment(\.modelContext) var modelContext
-    
+
     @State private var volumes: [URL] = []
+
+    /// The folder whose contents this view lists — the sub-series folder if we're
+    /// drilled in, otherwise the series root.
+    private var displayFolder: URL { folderOverride ?? manga.folderURL }
     
     // Multi-Select Support
     @State private var selectedVolumes: Set<URL> = []
@@ -43,13 +50,13 @@ struct SeriesDetailView: View {
             
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150))], spacing: 20) {
                 ForEach(volumes, id: \.self) { volumeURL in
-                    let isRead = manga.readVolumes.contains(volumeURL.lastPathComponent)
+                    let isRead = manga.readVolumes.contains(manga.volumeKey(for: volumeURL))
                     let isSelected = selectedVolumes.contains(volumeURL)
-                    
+
                     VStack {
                         VolumeCover(
                             folderURL: volumeURL,
-                            progress: manga.readingProgress[volumeURL.lastPathComponent],
+                            progress: manga.readingProgress[manga.volumeKey(for: volumeURL)],
                             isRead: isRead
                         )
                         .frame(height: 220)
@@ -72,9 +79,18 @@ struct SeriesDetailView: View {
                         // CONTEXT MENU
                         .contextMenu {
                             Button("Open") { openVolume(volumeURL) }
-                            
+
+                            // Escape hatch: force a folder-of-folders (e.g. a volume
+                            // split into chapters) to open merged in the reader
+                            // instead of being treated as a sub-series.
+                            if isDirectory(volumeURL) {
+                                Button("Open as Single Volume") {
+                                    navPath.append(VolumeDestination(volumeURL: volumeURL, mangaID: manga.persistentModelID))
+                                }
+                            }
+
                             Divider()
-                            
+
                             Button("Mark as Read") { batchToggleRead(read: true, clicked: volumeURL) }
                             Button("Mark as Unread") { batchToggleRead(read: false, clicked: volumeURL) }
                             
@@ -104,7 +120,7 @@ struct SeriesDetailView: View {
             }
             .padding()
         }
-        .navigationTitle(manga.title)
+        .navigationTitle(folderOverride?.lastPathComponent ?? manga.title)
         // 👇 NEW: Focusable enables key presses
         .focusable()
         .focusEffectDisabled()
@@ -161,7 +177,7 @@ struct SeriesDetailView: View {
         let targets = getTargets(clicked: clicked)
         
         for url in targets {
-            let name = url.lastPathComponent
+            let name = manga.volumeKey(for: url)
             if read {
                 if !manga.readVolumes.contains(name) { manga.readVolumes.append(name) }
                 manga.readingProgress.removeValue(forKey: name)
@@ -172,37 +188,53 @@ struct SeriesDetailView: View {
         checkIfFinished()
     }
     
+    func isDirectory(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
     func scanVolumes() {
         let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: manga.folderURL, includingPropertiesForKeys: nil) else { return }
-        
+        guard let items = try? fm.contentsOfDirectory(at: displayFolder, includingPropertiesForKeys: nil) else { return }
+
         let validExtensions = ["cbz", "zip", "epub"]
-        
+
         self.volumes = items.filter { url in
-            let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            let isDir = isDirectory(url)
             let isArchive = validExtensions.contains(url.pathExtension.lowercased())
             let isHidden = url.lastPathComponent.hasPrefix(".")
             return !isHidden && (isDir || isArchive)
         }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-        
-        if manga.volumeCount != volumes.count {
+
+        // Only the series root tracks the series' own volume count.
+        if folderOverride == nil, manga.volumeCount != volumes.count {
             manga.volumeCount = volumes.count
         }
     }
-    
+
     func openVolume(_ url: URL) {
         let ext = url.pathExtension.lowercased()
-        
-        if ["zip", "cbz"].contains(ext) || (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+
+        // Archives are always volumes (or novels).
+        if ["zip", "cbz"].contains(ext) {
             navPath.append(VolumeDestination(volumeURL: url, mangaID: manga.persistentModelID))
             return
         }
-        
         if ext == "epub" {
             if isVisualEpub(url) {
                 navPath.append(VolumeDestination(volumeURL: url, mangaID: manga.persistentModelID))
             } else {
                 navPath.append(NovelDestination(url: url, mangaID: manga.persistentModelID))
+            }
+            return
+        }
+
+        // A folder: read it if it holds pages, otherwise drill into it as a sub-series.
+        if isDirectory(url) {
+            switch classifyFolder(url) {
+            case .subSeries:
+                navPath.append(SubSeriesDestination(folderURL: url, mangaID: manga.persistentModelID))
+            case .volume, .empty:
+                navPath.append(VolumeDestination(volumeURL: url, mangaID: manga.persistentModelID))
             }
         }
     }
@@ -237,7 +269,7 @@ struct SeriesDetailView: View {
     }
     
     func toggleRead(_ url: URL) {
-        let name = url.lastPathComponent
+        let name = manga.volumeKey(for: url)
         if manga.readVolumes.contains(name) {
             manga.readVolumes.removeAll { $0 == name }
             manga.isFinished = false
@@ -246,28 +278,27 @@ struct SeriesDetailView: View {
             checkIfFinished()
         }
     }
-    
+
     func markPreviousAsRead(from url: URL) {
         guard let index = volumes.firstIndex(of: url) else { return }
         let previousVolumes = volumes.prefix(upTo: index + 1)
-        
+
         for vol in previousVolumes {
-            let name = vol.lastPathComponent
+            let name = manga.volumeKey(for: vol)
             if !manga.readVolumes.contains(name) {
                 manga.readVolumes.append(name)
             }
         }
         checkIfFinished()
     }
-    
+
     func checkIfFinished() {
-        let allNames = Set(volumes.map { $0.lastPathComponent })
+        // A sub-series view only sees part of the series, so it can't decide
+        // whether the whole thing is finished.
+        guard folderOverride == nil else { return }
+        let allNames = Set(volumes.map { manga.volumeKey(for: $0) })
         let readNames = Set(manga.readVolumes)
-        if readNames.isSuperset(of: allNames) {
-            manga.isFinished = true
-        } else {
-            manga.isFinished = false
-        }
+        manga.isFinished = readNames.isSuperset(of: allNames)
     }
     
     func renameVolume(_ url: URL, to name: String) {
@@ -409,6 +440,22 @@ struct VolumeCover: View {
               let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, opts) else { return nil }
         return NSImage(cgImage: cg, size: .zero)
     }
+
+    /// Finds the first image anywhere a couple of folders deep — used to give a
+    /// sub-series folder a cover from its first volume's first page.
+    static func firstImage(under dir: URL, exts: [String], fm: FileManager, depth: Int) -> URL? {
+        guard depth <= 2,
+              let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+        else { return nil }
+
+        let sorted = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        if let image = sorted.first(where: { exts.contains($0.pathExtension.lowercased()) }) { return image }
+
+        for sub in sorted where (try? sub.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true {
+            if let found = firstImage(under: sub, exts: exts, fm: fm, depth: depth + 1) { return found }
+        }
+        return nil
+    }
     
     func loadFolderCover(key: NSString) {
         let fm = FileManager.default
@@ -417,12 +464,15 @@ struct VolumeCover: View {
             DispatchQueue.main.async { self.loadFailed = true }; return
         }
         let images = items.filter { validExts.contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-        
+
+        // For a sub-series folder (no loose images) descend to find a cover.
+        let coverURL = images.first ?? Self.firstImage(under: folderURL, exts: validExts, fm: fm, depth: 0)
+
         DispatchQueue.main.async {
             self.totalPages = images.count
             PageCountCache.shared.setObject(NSNumber(value: images.count), forKey: key)
-            
-            if self.image == nil, let first = images.first {
+
+            if self.image == nil, let first = coverURL {
                 if let thumb = self.downsample(url: first) {
                     ThumbnailCache.shared.setObject(thumb, forKey: key)
                     self.image = thumb
