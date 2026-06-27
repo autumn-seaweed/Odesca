@@ -8,14 +8,146 @@
 import Foundation
 import SwiftUI
 import AppKit
+import ImageIO
 
 // Global Cache for the Reader
 class ReaderCache {
     static let shared = NSCache<NSURL, NSImage>()
+
+    /// Longest-edge pixel size we decode pages at — matched to the display so we
+    /// never hold (or draw) a bitmap larger than what can actually be shown.
+    static let targetPixelSize: CGFloat = {
+        let screen = NSScreen.main
+        let heightPoints = screen?.frame.height ?? 1200
+        let scale = screen?.backingScaleFactor ?? 2
+        // A little headroom above the screen height keeps pages crisp at fit-to-height.
+        return min(heightPoints * scale * 1.1, 3200)
+    }()
+
+    /// The most recently displayed page, shared across all page views. Used as a
+    /// backstop so a freshly-built (or not-yet-decoded) page view shows the last
+    /// real page instead of flashing to black during a fast scrub.
+    static var lastDisplayed: NSImage?
+
     static func configure() {
-        // Limit cache to 1GB of uncompressed data or 40 pages
-        shared.totalCostLimit = 1024 * 1024 * 1024
+        // Downsampled pages are only a few MB each; keep a bounded sliding window.
+        shared.totalCostLimit = 512 * 1024 * 1024
         shared.countLimit = 40
+        PageDiskCache.shared.trim() // keep the on-disk render cache bounded
+    }
+
+    static func cost(for image: NSImage) -> Int {
+        Int(image.size.width * image.size.height * 4)
+    }
+
+    /// Loads a page into the in-memory cache if it isn't already there.
+    static func cachePage(_ url: URL) {
+        if shared.object(forKey: url as NSURL) != nil { return }
+        if let image = decode(url) {
+            shared.setObject(image, forKey: url as NSURL, cost: cost(for: image))
+        }
+    }
+
+    /// Returns a display-ready, downsampled image. Checks the persistent on-disk
+    /// render cache first so an expensive AVIF/WebP page is only ever decoded from
+    /// source once; thereafter it loads a small fast JPEG.
+    static func decode(_ url: URL) -> NSImage? {
+        if let cached = PageDiskCache.shared.load(for: url) { return cached }
+        guard let cg = downsample(url) else { return nil }
+        let image = NSImage(cgImage: cg, size: CGSize(width: cg.width, height: cg.height))
+        PageDiskCache.shared.store(cg, for: url) // async write for next time
+        return image
+    }
+
+    /// Decodes `url` downsampled to `targetPixelSize` on its longest edge via
+    /// ImageIO. `ShouldCacheImmediately` forces the (CPU-bound, for AVIF/WebP)
+    /// decode to happen now, on whatever background thread we're called from.
+    private static func downsample(_ url: URL) -> CGImage? {
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: targetPixelSize
+        ]
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        return cg
+    }
+}
+
+// --- PERSISTENT ON-DISK PAGE RENDER CACHE ---
+// Decoding AVIF/WebP from source is CPU-only and slow. We pay that cost once,
+// then store a downsampled JPEG keyed by the source's path + size + mtime (+ the
+// display's target size). Subsequent reads decode a tiny JPEG in a few ms.
+final class PageDiskCache {
+    static let shared = PageDiskCache()
+    private let fm = FileManager.default
+    private let dir: URL?
+    private let byteBudget = 1_500 * 1024 * 1024 // ~1.5 GB ceiling
+
+    init() {
+        if let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            let d = appSupport.appendingPathComponent("PageCache", isDirectory: true)
+            try? fm.createDirectory(at: d, withIntermediateDirectories: true)
+            self.dir = d
+        } else {
+            self.dir = nil
+        }
+    }
+
+    // Deterministic (FNV-1a) hash — Swift's Hasher is per-process seeded, so it
+    // can't be used for a key that must survive across launches.
+    private func stableHash(_ s: String) -> String {
+        var hash: UInt64 = 1469598103934665603
+        for byte in s.utf8 { hash = (hash ^ UInt64(byte)) &* 1099511628211 }
+        return String(hash, radix: 16)
+    }
+
+    private func fileURL(for url: URL) -> URL? {
+        let vals = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let size = vals?.fileSize ?? 0
+        let mtime = Int(vals?.contentModificationDate?.timeIntervalSince1970 ?? 0)
+        let target = Int(ReaderCache.targetPixelSize)
+        let key = stableHash("\(url.path)|\(size)|\(mtime)|\(target)")
+        return dir?.appendingPathComponent(key).appendingPathExtension("jpg")
+    }
+
+    func load(for url: URL) -> NSImage? {
+        guard let f = fileURL(for: url), fm.fileExists(atPath: f.path),
+              let src = CGImageSourceCreateWithURL(f as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+        else { return nil }
+        return NSImage(cgImage: cg, size: CGSize(width: cg.width, height: cg.height))
+    }
+
+    func store(_ cg: CGImage, for url: URL) {
+        guard let f = fileURL(for: url) else { return }
+        Task.detached(priority: .background) {
+            let rep = NSBitmapImageRep(cgImage: cg)
+            guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.82]) else { return }
+            try? data.write(to: f)
+        }
+    }
+
+    /// Evict oldest renders when the cache outgrows its budget.
+    func trim() {
+        guard let dir else { return }
+        Task.detached(priority: .background) {
+            let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
+            guard let files = try? self.fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: Array(keys)) else { return }
+            var infos = files.compactMap { url -> (URL, Int, Date)? in
+                guard let v = try? url.resourceValues(forKeys: keys) else { return nil }
+                return (url, v.fileSize ?? 0, v.contentModificationDate ?? .distantPast)
+            }
+            var total = infos.reduce(0) { $0 + $1.1 }
+            guard total > self.byteBudget else { return }
+            infos.sort { $0.2 < $1.2 } // oldest first
+            for (url, size, _) in infos {
+                if total <= self.byteBudget { break }
+                try? self.fm.removeItem(at: url)
+                total -= size
+            }
+        }
     }
 }
 
@@ -33,6 +165,12 @@ struct MangaReaderView: View {
     
     // Track if we need to cleanup a temp folder later
     @State private var tempArchiveFolder: URL? = nil
+
+    // The in-flight prefetch job, cancelled & rescheduled as the window slides
+    @State private var prefetchTask: Task<Void, Never>? = nil
+
+    // Debounced progress save — we never write to SwiftData mid-flip
+    @State private var saveTask: Task<Void, Never>? = nil
     
     // --- VIEW OPTIONS ---
     @AppStorage("readingDirection") private var readingDirection: ReadingDirection = .rightToLeft
@@ -54,7 +192,6 @@ struct MangaReaderView: View {
                         // --- DOUBLE PAGE MODE ---
                         if let centerPage = layout.center {
                             CachedPageView(url: centerPage, size: geo.size, alignment: .center)
-                                .id(centerPage) // Forces refresh on turn
                         } else {
                             HStack(spacing: 0) {
                                 let leftPage = readingDirection == .rightToLeft ? layout.left : layout.right
@@ -64,16 +201,14 @@ struct MangaReaderView: View {
                                     CachedPageView(url: page,
                                              size: CGSize(width: geo.size.width / 2, height: geo.size.height),
                                              alignment: .trailing)
-                                    .id(page)
                                 } else {
                                     Spacer().frame(width: geo.size.width / 2)
                                 }
-                                
+
                                 if let page = rightPage {
                                     CachedPageView(url: page,
                                              size: CGSize(width: geo.size.width / 2, height: geo.size.height),
                                              alignment: .leading)
-                                    .id(page)
                                 } else {
                                     Spacer().frame(width: geo.size.width / 2)
                                 }
@@ -84,7 +219,6 @@ struct MangaReaderView: View {
                         if pages.indices.contains(currentIndex) {
                             let page = pages[currentIndex]
                             CachedPageView(url: page, size: geo.size, alignment: .center)
-                                .id(page)
                         }
                     }
                 }
@@ -133,14 +267,18 @@ struct MangaReaderView: View {
             prefetchWindow()
         }
         .onDisappear {
+            prefetchTask?.cancel()
+            saveTask?.cancel()
+            persistProgress(page: currentIndex) // Flush the final position
             ReaderCache.shared.removeAllObjects() // Clear RAM when leaving
+            ReaderCache.lastDisplayed = nil       // Don't flash a stale page in the next volume
             if let tmp = tempArchiveFolder {
                 try? FileManager.default.removeItem(at: tmp)
             }
         }
-        .onChange(of: currentIndex) { _, newIndex in
-            saveProgress(page: newIndex)
-            prefetchWindow() // Shift the sliding window
+        .onChange(of: currentIndex) { _, _ in
+            prefetchWindow() // Immediate: keep the next pages warm
+            scheduleSave()   // Debounced: never write to SwiftData mid-flip
         }
         // Keyboard Handlers
         .onKeyPress(.escape) {
@@ -212,21 +350,41 @@ struct MangaReaderView: View {
     // --- LOGIC ---
 
     func prefetchWindow() {
-        guard !pages.isEmpty else { return }
-        // 3 ahead, 1 behind
-        let start = max(0, currentIndex - 1)
-        let end = min(pages.count - 3, currentIndex + 10)
-        
-        guard start <= end else { return }
-        
-        Task.detached(priority: .userInitiated) {
-            for i in start...end {
-                let url = self.pages[i]
-                if ReaderCache.shared.object(forKey: url as NSURL) == nil {
-                    if let image = NSImage(contentsOf: url) {
-                        let cost = Int(image.size.width * image.size.height * 4)
-                        ReaderCache.shared.setObject(image, forKey: url as NSURL, cost: cost)
-                    }
+        guard pages.indices.contains(currentIndex) else { return }
+
+        // Cancel any in-flight prefetch so fast flipping doesn't pile up decode jobs.
+        prefetchTask?.cancel()
+
+        let lo = max(0, currentIndex - 2)
+        let hi = min(pages.count - 1, currentIndex + 8)
+
+        // Decode the visible page first, then fan out ahead, then behind.
+        var order: [URL] = [pages[currentIndex]]
+        if currentIndex + 1 <= hi { order += pages[(currentIndex + 1)...hi] }
+        if lo <= currentIndex - 1 { order += pages[lo...(currentIndex - 1)].reversed() }
+
+        prefetchTask = Task.detached(priority: .userInitiated) {
+            // Land the visible page ASAP…
+            guard let visible = order.first else { return }
+            ReaderCache.cachePage(visible)
+            guard !Task.isCancelled else { return }
+
+            // …then fill the rest of the window across multiple cores. AVIF/WebP
+            // decode is CPU-bound, so concurrency is what lets prefetch keep up
+            // with fast flipping.
+            let rest = Array(order.dropFirst())
+            let limit = max(2, min(6, ProcessInfo.processInfo.activeProcessorCount - 1))
+            await withTaskGroup(of: Void.self) { group in
+                var next = 0
+                func addNext() {
+                    guard next < rest.count else { return }
+                    let url = rest[next]; next += 1
+                    group.addTask { if !Task.isCancelled { ReaderCache.cachePage(url) } }
+                }
+                for _ in 0..<min(limit, rest.count) { addNext() }
+                while await group.next() != nil {
+                    if Task.isCancelled { break }
+                    addNext()
                 }
             }
         }
@@ -261,8 +419,12 @@ struct MangaReaderView: View {
         if let cached = ReaderCache.shared.object(forKey: url as NSURL) {
             return cached.size.width > cached.size.height
         }
-        guard let imageRep = NSImageRep(contentsOf: url) else { return false }
-        return imageRep.pixelsWide > imageRep.pixelsHigh
+        // Read just the header dimensions — no full-resolution decode.
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? CGFloat,
+              let h = props[kCGImagePropertyPixelHeight] as? CGFloat else { return false }
+        return w > h
     }
 
     func loadPages() {
@@ -327,13 +489,26 @@ struct MangaReaderView: View {
     
     // --- PROGRESS LOGIC ---
     
-    func saveProgress(page: Int) {
+    /// Debounce model writes so rapid page turns don't each trigger a SwiftData
+    /// mutation (which would invalidate this view and stutter the flip). Only the
+    /// page you land on — after a brief pause — gets persisted.
+    func scheduleSave() {
+        saveTask?.cancel()
+        let page = currentIndex
+        saveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            if Task.isCancelled { return }
+            persistProgress(page: page)
+        }
+    }
+
+    func persistProgress(page: Int) {
         let volName = volumeURL.lastPathComponent
         let totalPages = pages.count
         guard totalPages > 0 else { return }
-        
+
         manga.lastReadDate = Date()
-        
+
         if page >= totalPages - 1 {
             if !manga.readVolumes.contains(volName) { manga.readVolumes.append(volName) }
             manga.readingProgress.removeValue(forKey: volName)
@@ -378,32 +553,88 @@ struct CachedPageView: View {
     @State private var asyncImage: NSImage?
     
     var body: some View {
-        if let cached = ReaderCache.shared.object(forKey: url as NSURL) {
-            render(img: cached)
-        } else if let loaded = asyncImage {
-            render(img: loaded)
-        } else {
-            Color.black
-                .task(id: url) {
-                    self.asyncImage = nil
-                    let img = await Task.detached(priority: .userInitiated) {
-                        return NSImage(contentsOf: url)
-                    }.value
-                    
-                    if let img {
-                        let cost = Int(img.size.width * img.size.height * 4)
-                        ReaderCache.shared.setObject(img, forKey: url as NSURL, cost: cost)
-                        await MainActor.run { self.asyncImage = img }
-                    }
-                }
+        Group {
+            if let img = displayImage {
+                render(img: img)
+            } else {
+                Color.black // only the very first page, before anything has decoded
+            }
         }
+        .task(id: url) {
+            // Already decoded (e.g. prefetch beat us to it)? Still publish it to
+            // state — NSCache isn't observable, so without this the freshly cached
+            // page wouldn't trigger a re-render and the view would stay black.
+            if let cached = ReaderCache.shared.object(forKey: url as NSURL) {
+                if asyncImage !== cached { asyncImage = cached }
+                return
+            }
+            let target = url
+            let img = await Task.detached(priority: .userInitiated) {
+                ReaderCache.decode(target)
+            }.value
+            guard !Task.isCancelled, let img else { return }
+            ReaderCache.shared.setObject(img, forKey: target as NSURL, cost: ReaderCache.cost(for: img))
+            self.asyncImage = img
+        }
+    }
+
+    /// Resolves the image to draw, preferring (in order): the exact page from the
+    /// cache, this view's own last decode, then the global last-displayed page as a
+    /// backstop so we never flash to black mid-scrub.
+    private var displayImage: NSImage? {
+        if let cached = ReaderCache.shared.object(forKey: url as NSURL) {
+            ReaderCache.lastDisplayed = cached
+            return cached
+        }
+        if let loaded = asyncImage {
+            ReaderCache.lastDisplayed = loaded
+            return loaded
+        }
+        return ReaderCache.lastDisplayed
     }
     
     func render(img: NSImage) -> some View {
-        Image(nsImage: img)
-            .resizable()
-            .aspectRatio(contentMode: .fit)
-            .frame(width: size.width, height: size.height, alignment: alignment)
+        // Layer-backed NSImageView: scaling happens on the GPU and the decoded
+        // bitmap is cached as a texture, so a page turn is just a texture swap.
+        PageImageView(image: img, alignment: alignment)
+            .frame(width: size.width, height: size.height)
             .clipped()
+    }
+}
+
+// --- GPU-BACKED PAGE RENDERER ---
+// SwiftUI's `Image` re-rasterizes large bitmaps on the CPU during layout. An
+// NSImageView is layer-backed, so AppKit hands the bitmap to Core Animation once
+// and subsequent draws/scales are hardware-accelerated — the key to instant turns.
+struct PageImageView: NSViewRepresentable {
+    let image: NSImage
+    let alignment: Alignment
+
+    func makeNSView(context: Context) -> NSImageView {
+        let view = NSImageView()
+        view.wantsLayer = true
+        view.animates = false
+        view.imageScaling = .scaleProportionallyUpOrDown
+        view.imageAlignment = nsAlignment
+        view.image = image
+        // Let the SwiftUI frame drive the size rather than the image's intrinsic size.
+        view.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        view.setContentHuggingPriority(.defaultLow, for: .vertical)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        view.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        return view
+    }
+
+    func updateNSView(_ view: NSImageView, context: Context) {
+        if view.image !== image { view.image = image }
+        view.imageAlignment = nsAlignment
+    }
+
+    private var nsAlignment: NSImageAlignment {
+        switch alignment {
+        case .leading:  return .alignLeft
+        case .trailing: return .alignRight
+        default:        return .alignCenter
+        }
     }
 }
