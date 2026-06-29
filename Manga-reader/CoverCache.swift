@@ -6,6 +6,16 @@
 //
 
 import SwiftUI
+import ImageIO
+
+/// Deterministic (FNV-1a) cache id from a stable string (e.g. a folder path).
+/// Swift's `hashValue` is seeded per process, so it can't key a disk cache that
+/// must survive relaunches — this can.
+func stableCacheID(_ s: String) -> String {
+    var h: UInt64 = 1469598103934665603
+    for b in s.utf8 { h = (h ^ UInt64(b)) &* 1099511628211 }
+    return String(h, radix: 16)
+}
 
 class CoverCache {
     static let shared = CoverCache()
@@ -36,13 +46,14 @@ class CoverCache {
         try? data.write(to: url)
     }
     
-    // LOAD from Disk
+    // LOAD from Disk — fully decode now (on the caller's background thread) so we
+    // don't pay a lazy decode on the main thread while scrolling.
     func load(for id: String) -> NSImage? {
         guard let url = fileURL(for: id),
-              let data = try? Data(contentsOf: url)
+              let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
         else { return nil }
-        
-        return NSImage(data: data)
+        return NSImage(cgImage: cg, size: NSSize(width: cg.width, height: cg.height))
     }
     
     // DELETE (For "Refresh Cover")

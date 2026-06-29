@@ -20,7 +20,8 @@ struct MangaDisplayItem: Identifiable, Equatable {
     let volumeCount: Int
     let readCount: Int
     
-    var cacheID: String { String(id.hashValue) }
+    // Stable across launches (path-based) so the on-disk cover cache actually hits.
+    var cacheID: String { stableCacheID(folderURL.path) }
     
     init(manga: MangaSeries) {
         self.id = manga.persistentModelID
@@ -434,7 +435,7 @@ struct AsyncMangaCover: View {
             return
         }
         
-        let loadedImage = await Task.detached(priority: .background) { () -> NSImage? in
+        let loadedImage = await Task.detached(priority: .userInitiated) { () -> NSImage? in
             if Task.isCancelled { return nil }
             let fm = FileManager.default
             

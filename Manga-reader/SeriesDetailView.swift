@@ -500,26 +500,46 @@ struct VolumeCover: View {
             DispatchQueue.main.async { self.loadFailed = true }; return
         }
         let images = items.filter { validExts.contains($0.pathExtension.lowercased()) }.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        let count = images.count
+        let diskID = stableCacheID(folderURL.path)
 
-        // For a sub-series folder (no loose images) descend to find a cover.
-        let coverURL = images.first ?? Self.firstImage(under: folderURL, exts: validExts, fm: fm, depth: 0)
-
+        // Resolve the thumbnail off the main thread: RAM → disk → decode (+persist).
+        var thumb = ThumbnailCache.shared.object(forKey: key) ?? CoverCache.shared.load(for: diskID)
+        if thumb == nil {
+            // For a sub-series folder (no loose images) descend to find a cover.
+            let coverURL = images.first ?? Self.firstImage(under: folderURL, exts: validExts, fm: fm, depth: 0)
+            if let first = coverURL, let t = self.downsample(url: first) {
+                thumb = t
+                ThumbnailCache.shared.setObject(t, forKey: key)
+                CoverCache.shared.save(image: t, for: diskID)
+            }
+        }
+        let result = thumb
         DispatchQueue.main.async {
-            self.totalPages = images.count
-            PageCountCache.shared.setObject(NSNumber(value: images.count), forKey: key)
-
-            if self.image == nil, let first = coverURL {
-                if let thumb = self.downsample(url: first) {
-                    ThumbnailCache.shared.setObject(thumb, forKey: key)
-                    self.image = thumb
-                } else { self.loadFailed = true }
-            } else if self.image == nil { self.loadFailed = true }
+            self.totalPages = count
+            PageCountCache.shared.setObject(NSNumber(value: count), forKey: key)
+            if let result { if self.image == nil { self.image = result } }
+            else if self.image == nil { self.loadFailed = true }
         }
     }
-    
+
     func loadArchiveCover(key: NSString) {
         let fm = FileManager.default
+        let diskID = stableCacheID(folderURL.path)
+
+        // Already have a cover? Skip the expensive unzip entirely.
+        if let thumb = ThumbnailCache.shared.object(forKey: key) ?? CoverCache.shared.load(for: diskID) {
+            ThumbnailCache.shared.setObject(thumb, forKey: key)
+            let cachedCount = PageCountCache.shared.object(forKey: key)?.intValue ?? 100
+            DispatchQueue.main.async {
+                self.totalPages = cachedCount
+                if self.image == nil { self.image = thumb }
+            }
+            return
+        }
+
         let tempDir = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: tempDir) }
         do {
             try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
             let process = Process()
@@ -529,21 +549,23 @@ struct VolumeCover: View {
                                  "*.JPG", "*.JPEG", "*.PNG", "*.WEBP",
                                  "-d", tempDir.path]
             try process.run(); process.waitUntilExit()
-            
+
             let items = (try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)) ?? []
-            let images = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
-            
+            let sorted = items.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            let count = sorted.isEmpty ? 100 : max(100, sorted.count)
+
+            var thumb: NSImage? = nil
+            if let first = sorted.first, let t = self.downsample(url: first) {
+                thumb = t
+                ThumbnailCache.shared.setObject(t, forKey: key)
+                CoverCache.shared.save(image: t, for: diskID)
+            }
+            let result = thumb
             DispatchQueue.main.async {
-                self.totalPages = images.isEmpty ? 100 : max(100, images.count)
-                PageCountCache.shared.setObject(NSNumber(value: self.totalPages), forKey: key)
-                
-                if let first = images.first, let thumb = self.downsample(url: first) {
-                    ThumbnailCache.shared.setObject(thumb, forKey: key)
-                    self.image = thumb
-                } else {
-                    self.loadFailed = true
-                }
-                try? fm.removeItem(at: tempDir)
+                self.totalPages = count
+                PageCountCache.shared.setObject(NSNumber(value: count), forKey: key)
+                if let result { if self.image == nil { self.image = result } }
+                else if self.image == nil { self.loadFailed = true }
             }
         } catch {
             DispatchQueue.main.async {
