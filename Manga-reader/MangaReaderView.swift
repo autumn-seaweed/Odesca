@@ -607,6 +607,8 @@ struct MangaReaderView: View {
         if page >= totalPages - 1 {
             if !manga.readVolumes.contains(volName) { manga.readVolumes.append(volName) }
             manga.readingProgress.removeValue(forKey: volName)
+            // One-shot (reading the series folder itself): the whole series is done.
+            if volumeURL == manga.folderURL { manga.isFinished = true }
             return
         }
         

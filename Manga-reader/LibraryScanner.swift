@@ -18,6 +18,7 @@ class LibraryScanner: ObservableObject {
     private var roots: [UUID: URL] = [:]
 
     private let archiveExts = ["epub", "zip", "cbz"]
+    private let imageExts = ["jpg", "jpeg", "png", "avif", "webp"]
 
     // MARK: - Library management
 
@@ -112,8 +113,15 @@ class LibraryScanner: ObservableObject {
                 let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
                 return isDir || archiveExts.contains(item.pathExtension.lowercased())
             }
-            let volCount = validVolumes.count
-            let validNames = Set(validVolumes.map { $0.lastPathComponent })
+            var volCount = validVolumes.count
+            var validNames = Set(validVolumes.map { $0.lastPathComponent })
+
+            // One-shot: the series folder holds pages directly, with no volume
+            // subfolders. Treat the series itself as a single volume.
+            if volCount == 0, volItems.contains(where: { imageExts.contains($0.pathExtension.lowercased()) }) {
+                volCount = 1
+                validNames.insert(name)
+            }
 
             if let series = existingByPath[rel] {
                 series.folderURL = folder            // refresh in case the mount path changed

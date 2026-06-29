@@ -91,7 +91,8 @@ struct ContentView: View {
                         filter: currentFilter,
                         libraryID: selectedLibraryID,
                         navPath: $navPath,
-                        recents: showRecents ? Array(recents.prefix(10)) : []
+                        recents: showRecents ? Array(recents.prefix(10)) : [],
+                        onAddLibrary: addLibrary
                     )
                 }
                 .navigationTitle(libraryTitle)

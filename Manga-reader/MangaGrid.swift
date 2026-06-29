@@ -62,16 +62,18 @@ struct MangaGrid: View {
     let searchString: String
     let filter: LibraryFilter
     let libraryID: UUID?
+    let onAddLibrary: () -> Void
 
     // Spacing helps prevent visual collision
     let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 20)]
 
-    init(sort: SortDescriptor<MangaSeries>, searchString: String, filter: LibraryFilter, libraryID: UUID?, navPath: Binding<NavigationPath>, recents: [MangaSeries]) {
+    init(sort: SortDescriptor<MangaSeries>, searchString: String, filter: LibraryFilter, libraryID: UUID?, navPath: Binding<NavigationPath>, recents: [MangaSeries], onAddLibrary: @escaping () -> Void) {
         self.searchString = searchString
         self.filter = filter
         self.libraryID = libraryID
         self._navPath = navPath
         self.recents = recents
+        self.onAddLibrary = onAddLibrary
         _library = Query(sort: [sort], animation: .default)
     }
 
@@ -104,6 +106,9 @@ struct MangaGrid: View {
                 mangaLibraryGrid
             }
         }
+        // Always fill the detail area so the empty/no-results states don't
+        // collapse and drag the header bar into the middle of the window.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onTapGesture { selectedIds.removeAll() }
         .alert("Rename Series", isPresented: $showRenameAlert) {
             TextField("New Name", text: $newName)
@@ -124,9 +129,7 @@ struct MangaGrid: View {
         } description: {
             Text("Add a folder containing your manga collection to get started.")
         } actions: {
-            Button("Add Folder") {
-                NSApp.sendAction(#selector(NSDocumentController.openDocument(_:)), to: nil, from: nil)
-            }
+            Button("Add Library", action: onAddLibrary)
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
         }
@@ -214,7 +217,14 @@ struct MangaGrid: View {
     
     func openManga(id: PersistentIdentifier) {
         selectedIds = [id]
-        navPath.append(id)
+        // A one-shot series holds its pages directly (Series → pages, no volume
+        // subfolder), so open it straight in the reader instead of an empty detail.
+        if let manga = library.first(where: { $0.persistentModelID == id }),
+           classifyFolder(manga.folderURL) == .volume {
+            navPath.append(VolumeDestination(volumeURL: manga.folderURL, mangaID: id))
+        } else {
+            navPath.append(id)
+        }
     }
     
     func handleSelection(id: PersistentIdentifier) {
