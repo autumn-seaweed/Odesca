@@ -7,6 +7,7 @@
 
 import SwiftUI
 import SwiftData
+import AppKit
 
 struct MangaGridItem: View, Equatable {
     let item: MangaDisplayItem
@@ -53,7 +54,11 @@ struct MangaGridItem: View, Equatable {
                     .foregroundStyle(item.isFinished ? .green : .secondary)
             }
         }
-        .onTapGesture(count: 2) { onOpen() }
-        .simultaneousGesture(TapGesture().onEnded { onSelect() })
+        // One instant tap handler — no count:2 gesture to wait on. The OS click
+        // count distinguishes a single click (select) from a double (open), so
+        // selection feels immediate.
+        .onTapGesture {
+            if (NSApp.currentEvent?.clickCount ?? 1) >= 2 { onOpen() } else { onSelect() }
+        }
     }
 }

@@ -292,6 +292,14 @@ struct MangaReaderView: View {
         .focusable()
         .focused($isFocused)
         .focusEffectDisabled()
+        .focusedValue(\.readerActions, ReaderActions(
+            gallery: { showGallery.toggle() },
+            bookmark: { toggleBookmark(currentIndex) },
+            bookmarksPanel: { showBookmarks.toggle() },
+            offset: { if currentIndex < pages.count - 1 { currentIndex += 1 } },
+            favorite: { manga.isFavorite.toggle() },
+            markRead: { markAsRead() }
+        ))
         .onAppear {
             ReaderCache.configure()
             loadPages()

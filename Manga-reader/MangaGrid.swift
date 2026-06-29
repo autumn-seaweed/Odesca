@@ -188,6 +188,21 @@ struct MangaGrid: View {
         }
         .focusable()
         .focusEffectDisabled()
+        .focusedValue(\.libraryActions, LibraryActions(
+            open: { if let id = selectedIds.first { openManga(id: id) } },
+            favorite: {
+                let targets = library.filter { selectedIds.contains($0.persistentModelID) }
+                if !targets.isEmpty { batchSetFavorite(targets: targets, active: !targets.allSatisfy { $0.isFavorite }) }
+            },
+            markRead: {
+                let targets = library.filter { selectedIds.contains($0.persistentModelID) }
+                if !targets.isEmpty { batchMarkRead(targets: targets, read: !targets.allSatisfy { $0.isFinished }) }
+            },
+            delete: {
+                let targets = library.filter { selectedIds.contains($0.persistentModelID) }
+                if !targets.isEmpty { confirmDelete(targets: targets) }
+            }
+        ))
         .onKeyPress(.delete) {
             let targets = library.filter { selectedIds.contains($0.persistentModelID) }
             if !targets.isEmpty { confirmDelete(targets: targets) }

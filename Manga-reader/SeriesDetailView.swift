@@ -68,12 +68,14 @@ struct SeriesDetailView: View {
                         )
                         .contentShape(Rectangle())
                         
-                        // GESTURES
-                        .onTapGesture(count: 2) {
-                            openVolume(volumeURL)
-                        }
+                        // GESTURES — single instant tap; OS click count tells
+                        // a single click (select) from a double (open).
                         .onTapGesture {
-                            handleSelection(volumeURL)
+                            if (NSApp.currentEvent?.clickCount ?? 1) >= 2 {
+                                openVolume(volumeURL)
+                            } else {
+                                handleSelection(volumeURL)
+                            }
                         }
                         
                         // CONTEXT MENU
@@ -124,6 +126,16 @@ struct SeriesDetailView: View {
         // 👇 NEW: Focusable enables key presses
         .focusable()
         .focusEffectDisabled()
+        .focusedValue(\.libraryActions, LibraryActions(
+            open: { if let first = selectedVolumes.first { openVolume(first) } },
+            favorite: { manga.isFavorite.toggle() },
+            markRead: {
+                guard !selectedVolumes.isEmpty else { return }
+                let allRead = selectedVolumes.allSatisfy { manga.readVolumes.contains(manga.volumeKey(for: $0)) }
+                for v in selectedVolumes { batchToggleRead(read: !allRead, clicked: v) }
+            },
+            delete: { if !selectedVolumes.isEmpty { deleteSelectedVolumes() } }
+        ))
         // 👇 NEW: ESC to Go Back
         .onKeyPress(.escape) {
             dismiss()
