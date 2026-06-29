@@ -61,13 +61,15 @@ struct MangaGrid: View {
     
     let searchString: String
     let filter: LibraryFilter
-    
+    let libraryID: UUID?
+
     // Spacing helps prevent visual collision
     let columns = [GridItem(.adaptive(minimum: 150, maximum: 220), spacing: 20)]
-    
-    init(sort: SortDescriptor<MangaSeries>, searchString: String, filter: LibraryFilter, navPath: Binding<NavigationPath>, recents: [MangaSeries]) {
+
+    init(sort: SortDescriptor<MangaSeries>, searchString: String, filter: LibraryFilter, libraryID: UUID?, navPath: Binding<NavigationPath>, recents: [MangaSeries]) {
         self.searchString = searchString
         self.filter = filter
+        self.libraryID = libraryID
         self._navPath = navPath
         self.recents = recents
         _library = Query(sort: [sort], animation: .default)
@@ -75,6 +77,7 @@ struct MangaGrid: View {
 
     var filteredLibrary: [MangaSeries] {
         library.filter { manga in
+            let matchesLibrary = libraryID == nil || manga.libraryID == libraryID
             let matchesFilter: Bool
             switch filter {
             case .all: matchesFilter = true
@@ -83,7 +86,7 @@ struct MangaGrid: View {
             case .toRead: matchesFilter = manga.tags.contains("To Read")
             }
             let matchesSearch = searchString.isEmpty || manga.title.localizedStandardContains(searchString)
-            return matchesFilter && matchesSearch
+            return matchesLibrary && matchesFilter && matchesSearch
         }
     }
     
@@ -190,6 +193,20 @@ struct MangaGrid: View {
         .onKeyPress(.return) {
             if let firstId = selectedIds.first { openManga(id: firstId); return .handled }
             return .ignored
+        }
+        .onKeyPress("f") {
+            let targets = library.filter { selectedIds.contains($0.persistentModelID) }
+            guard !targets.isEmpty else { return .ignored }
+            let allFav = targets.allSatisfy { $0.isFavorite }
+            batchSetFavorite(targets: targets, active: !allFav)
+            return .handled
+        }
+        .onKeyPress("r") {
+            let targets = library.filter { selectedIds.contains($0.persistentModelID) }
+            guard !targets.isEmpty else { return .ignored }
+            let allRead = targets.allSatisfy { $0.isFinished }
+            batchMarkRead(targets: targets, read: !allRead)
+            return .handled
         }
     }
     

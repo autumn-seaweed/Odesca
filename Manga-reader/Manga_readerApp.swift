@@ -14,6 +14,6 @@ struct Manga_readerApp: App {
         WindowGroup {
             ContentView()
         }
-        .modelContainer(for: MangaSeries.self)
+        .modelContainer(for: [MangaSeries.self, Library.self])
     }
 }

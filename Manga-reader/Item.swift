@@ -44,7 +44,20 @@ final class MangaSeries {
     var volumeCount: Int = 0
     var isFavorite: Bool = false
     var readingProgress: [String: Int] = [:]
-    
+
+    // Saved pages per volume, keyed by volumeKey → sorted page indices.
+    var bookmarks: [String: [Int]] = [:]
+
+    // --- Multi-library support ---
+    // Which library this series belongs to, and its path relative to that
+    // library's root. Matching on (libraryID, relativePath) — instead of the
+    // absolute folderURL — keeps read history intact when a library is ejected
+    // and later re-attached at a different mount point.
+    var libraryID: UUID? = nil
+    var relativePath: String = ""
+    // Set when the owning library can't currently be reached (folder ejected).
+    var isAvailable: Bool = true
+
     init(title: String, folderURL: URL) {
         self.title = title
         self.folderURL = folderURL
@@ -58,6 +71,24 @@ final class MangaSeries {
         self.volumeCount = 0
         self.isFavorite = false
         self.readingProgress = [:]
+        self.bookmarks = [:]
+    }
+}
+
+// A root folder the user has added to their collection. Stored as a
+// security-scoped bookmark so access survives relaunches.
+@Model
+final class Library {
+    var id: UUID = UUID()
+    var name: String = ""
+    var bookmark: Data = Data()
+    var dateAdded: Date = Date()
+
+    init(name: String, bookmark: Data) {
+        self.id = UUID()
+        self.name = name
+        self.bookmark = bookmark
+        self.dateAdded = Date()
     }
 }
 

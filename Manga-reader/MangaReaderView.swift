@@ -171,7 +171,11 @@ struct MangaReaderView: View {
 
     // Debounced progress save — we never write to SwiftData mid-flip
     @State private var saveTask: Task<Void, Never>? = nil
-    
+
+    // Page gallery + bookmarks UI
+    @State private var showGallery = false
+    @State private var showBookmarks = false
+
     // --- VIEW OPTIONS ---
     @AppStorage("readingDirection") private var readingDirection: ReadingDirection = .rightToLeft
     @AppStorage("isTwoPageMode") private var isTwoPageMode = false
@@ -239,19 +243,49 @@ struct MangaReaderView: View {
                         }
                 }
                 
-                // --- LAYER 3: PROGRESS BAR ---
+                // --- LAYER 3: PROGRESS BAR (fills from the side you read toward) ---
                 VStack {
                     Spacer()
                     GeometryReader { barGeo in
-                        ZStack(alignment: .leading) {
+                        let frac = CGFloat(currentIndex + 1) / CGFloat(max(1, pages.count))
+                        ZStack(alignment: readingDirection == .rightToLeft ? .trailing : .leading) {
                             Rectangle().fill(Color.white.opacity(0.3))
                             Rectangle().fill(Color.accentColor)
-                                .frame(width: barGeo.size.width * (CGFloat(currentIndex + 1) / CGFloat(max(1, pages.count))))
+                                .frame(width: barGeo.size.width * frac)
                         }
                     }
                     .frame(height: 3)
                 }
                 .padding(.bottom, 0)
+
+                // --- LAYER 4: BOOKMARKS SIDE PANEL ---
+                if showBookmarks {
+                    HStack(spacing: 0) {
+                        Spacer()
+                        BookmarksPanel(
+                            pages: pages,
+                            bookmarks: bookmarkedPages,
+                            current: currentIndex,
+                            onPick: { i in currentIndex = i },
+                            onRemove: { i in toggleBookmark(i) },
+                            onClose: { showBookmarks = false }
+                        )
+                        .frame(width: 250)
+                        .transition(.move(edge: .trailing))
+                    }
+                }
+
+                // --- LAYER 5: PAGE GALLERY (full-screen) ---
+                if showGallery {
+                    PageGalleryView(
+                        pages: pages,
+                        current: currentIndex,
+                        bookmarked: Set(bookmarkedPages),
+                        onPick: { i in currentIndex = i; showGallery = false },
+                        onClose: { showGallery = false }
+                    )
+                    .transition(.opacity)
+                }
             }
             .onTapGesture { isFocused = true } // Re-focus on click
         }
@@ -282,9 +316,21 @@ struct MangaReaderView: View {
         }
         // Keyboard Handlers
         .onKeyPress(.escape) {
+            if showGallery { showGallery = false; return .handled }
+            if showBookmarks { showBookmarks = false; return .handled }
             dismiss()
             return .handled
         }
+        // Shortcuts: gallery, bookmark, bookmarks panel, offset, favorite, mark read
+        .onKeyPress("g") { showGallery.toggle(); return .handled }
+        .onKeyPress("b") { toggleBookmark(currentIndex); return .handled }
+        .onKeyPress("l") { showBookmarks.toggle(); return .handled }
+        .onKeyPress("o") {
+            if currentIndex < pages.count - 1 { currentIndex += 1 }
+            return .handled
+        }
+        .onKeyPress("f") { manga.isFavorite.toggle(); return .handled }
+        .onKeyPress("r") { markAsRead(); return .handled }
         .onKeyPress(.downArrow) {
             let layout = calculateLayout(for: currentIndex, in: pages)
             navigateNext(step: isTwoPageMode ? layout.step : 1)
@@ -309,12 +355,30 @@ struct MangaReaderView: View {
         .navigationTitle(currentTitle)
         .navigationSubtitle(currentSubtitle)
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button(action: { showGallery.toggle() }) {
+                    Label("All Pages", systemImage: "square.grid.2x2")
+                }
+                .help("Page gallery (G)")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Picker("View Mode", selection: $isTwoPageMode) {
                     Image(systemName: "rectangle").tag(false).help("Single Page View")
                     Image(systemName: "book").tag(true).help("Two Page View")
                 }
                 .pickerStyle(.segmented).frame(width: 100)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: { toggleBookmark(currentIndex) }) {
+                    Label("Bookmark", systemImage: isBookmarked(currentIndex) ? "bookmark.fill" : "bookmark")
+                }
+                .help("Bookmark this page (B)")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: { showBookmarks.toggle() }) {
+                    Label("Bookmarks", systemImage: "bookmark.circle")
+                }
+                .help("Show bookmarks (L)")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button(action: { if currentIndex < pages.count - 1 { currentIndex += 1 } }) {
@@ -345,6 +409,17 @@ struct MangaReaderView: View {
     private var currentSubtitle: String {
         guard pages.indices.contains(currentIndex) else { return "" }
         return "\(pages[currentIndex].lastPathComponent)   (\(currentIndex + 1) / \(pages.count))"
+    }
+
+    // --- BOOKMARKS ---
+    private var volKey: String { manga.volumeKey(for: volumeURL) }
+    private var bookmarkedPages: [Int] { manga.bookmarks[volKey] ?? [] }
+    private func isBookmarked(_ i: Int) -> Bool { bookmarkedPages.contains(i) }
+    private func toggleBookmark(_ i: Int) {
+        guard pages.indices.contains(i) else { return }
+        var b = manga.bookmarks[volKey] ?? []
+        if let idx = b.firstIndex(of: i) { b.remove(at: idx) } else { b.append(i); b.sort() }
+        if b.isEmpty { manga.bookmarks[volKey] = nil } else { manga.bookmarks[volKey] = b }
     }
     
     // --- LOGIC ---
@@ -656,5 +731,161 @@ struct PageImageView: NSViewRepresentable {
         case .trailing: return .alignRight
         default:        return .alignCenter
         }
+    }
+}
+
+// --- SMALL THUMBNAILS FOR THE PAGE GALLERY / BOOKMARKS ---
+final class ReaderThumbCache {
+    static let shared: NSCache<NSURL, NSImage> = {
+        let c = NSCache<NSURL, NSImage>(); c.countLimit = 500; return c
+    }()
+    static func thumb(_ url: URL) -> NSImage? {
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 360
+        ]
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else { return nil }
+        return NSImage(cgImage: cg, size: CGSize(width: cg.width, height: cg.height))
+    }
+}
+
+struct ReaderThumb: View {
+    let url: URL
+    @State private var img: NSImage?
+    var body: some View {
+        ZStack {
+            if let img {
+                Image(nsImage: img).resizable().aspectRatio(contentMode: .fit)
+            } else {
+                Color.white.opacity(0.06)
+            }
+        }
+        .task(id: url) {
+            if let c = ReaderThumbCache.shared.object(forKey: url as NSURL) { img = c; return }
+            let t = await Task.detached(priority: .userInitiated) { ReaderThumbCache.thumb(url) }.value
+            if let t {
+                ReaderThumbCache.shared.setObject(t, forKey: url as NSURL)
+                img = t
+            }
+        }
+    }
+}
+
+// --- FULL-SCREEN PAGE GALLERY ---
+struct PageGalleryView: View {
+    let pages: [URL]
+    let current: Int
+    let bookmarked: Set<Int>
+    let onPick: (Int) -> Void
+    let onClose: () -> Void
+
+    private let columns = [GridItem(.adaptive(minimum: 130, maximum: 180), spacing: 16)]
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.97).ignoresSafeArea()
+            VStack(spacing: 0) {
+                HStack {
+                    Text("All Pages").font(.headline).foregroundStyle(.white)
+                    Spacer()
+                    Text("\(pages.count) pages").foregroundStyle(.white.opacity(0.6)).font(.subheadline)
+                    Button(action: onClose) { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(.white.opacity(0.8)).font(.title2)
+                }
+                .padding()
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 16) {
+                            ForEach(pages.indices, id: \.self) { i in
+                                VStack(spacing: 4) {
+                                    ReaderThumb(url: pages[i])
+                                        .frame(height: 200)
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 6)
+                                                .stroke(i == current ? Color.accentColor : Color.white.opacity(0.12),
+                                                        lineWidth: i == current ? 3 : 1)
+                                        )
+                                        .overlay(alignment: .topTrailing) {
+                                            if bookmarked.contains(i) {
+                                                Image(systemName: "bookmark.fill")
+                                                    .foregroundStyle(.yellow).font(.caption).padding(6)
+                                            }
+                                        }
+                                    Text("\(i + 1)").font(.caption2)
+                                        .foregroundStyle(i == current ? Color.accentColor : .white.opacity(0.6))
+                                }
+                                .id(i)
+                                .contentShape(Rectangle())
+                                .onTapGesture { onPick(i) }
+                            }
+                        }
+                        .padding()
+                    }
+                    .onAppear { proxy.scrollTo(current, anchor: .center) }
+                }
+            }
+        }
+    }
+}
+
+// --- BOOKMARKS SIDE PANEL ---
+struct BookmarksPanel: View {
+    let pages: [URL]
+    let bookmarks: [Int]
+    let current: Int
+    let onPick: (Int) -> Void
+    let onRemove: (Int) -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Bookmarks").font(.headline).foregroundStyle(.white)
+                Spacer()
+                Button(action: onClose) { Image(systemName: "xmark") }
+                    .buttonStyle(.plain).foregroundStyle(.white.opacity(0.7))
+            }
+            .padding(12)
+            Divider().overlay(Color.white.opacity(0.1))
+            if bookmarks.isEmpty {
+                Spacer()
+                VStack(spacing: 8) {
+                    Image(systemName: "bookmark").font(.largeTitle).foregroundStyle(.white.opacity(0.3))
+                    Text("No bookmarks yet").foregroundStyle(.white.opacity(0.5)).font(.callout)
+                    Text("Press B to bookmark a page").foregroundStyle(.white.opacity(0.3)).font(.caption)
+                }
+                .multilineTextAlignment(.center).padding()
+                Spacer()
+            } else {
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(bookmarks, id: \.self) { i in
+                            HStack(spacing: 10) {
+                                if pages.indices.contains(i) {
+                                    ReaderThumb(url: pages[i])
+                                        .frame(width: 44, height: 62)
+                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                }
+                                Text("Page \(i + 1)")
+                                    .foregroundStyle(i == current ? Color.accentColor : .white)
+                                    .font(.callout)
+                                Spacer()
+                                Button(action: { onRemove(i) }) { Image(systemName: "xmark.circle.fill") }
+                                    .buttonStyle(.plain).foregroundStyle(.white.opacity(0.4))
+                            }
+                            .padding(.horizontal, 10).padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                            .onTapGesture { onPick(i) }
+                        }
+                    }
+                    .padding(.vertical, 8)
+                }
+            }
+        }
+        .background(Color(white: 0.12))
     }
 }

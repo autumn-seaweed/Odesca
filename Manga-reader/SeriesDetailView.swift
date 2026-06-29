@@ -129,6 +129,21 @@ struct SeriesDetailView: View {
             dismiss()
             return .handled
         }
+        .onKeyPress(.return) {
+            if let first = selectedVolumes.first { openVolume(first); return .handled }
+            return .ignored
+        }
+        .onKeyPress("r") {
+            guard !selectedVolumes.isEmpty else { return .ignored }
+            let allRead = selectedVolumes.allSatisfy { manga.readVolumes.contains(manga.volumeKey(for: $0)) }
+            for v in selectedVolumes { batchToggleRead(read: !allRead, clicked: v) }
+            return .handled
+        }
+        .onKeyPress(.delete) {
+            guard !selectedVolumes.isEmpty else { return .ignored }
+            deleteSelectedVolumes()
+            return .handled
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { scanVolumes() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
@@ -190,6 +205,15 @@ struct SeriesDetailView: View {
     
     func isDirectory(_ url: URL) -> Bool {
         (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+    }
+
+    func deleteSelectedVolumes() {
+        let fm = FileManager.default
+        for url in selectedVolumes {
+            try? fm.trashItem(at: url, resultingItemURL: nil) // recoverable from Trash
+        }
+        selectedVolumes.removeAll()
+        scanVolumes()
     }
 
     func scanVolumes() {
