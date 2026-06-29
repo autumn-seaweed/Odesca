@@ -22,20 +22,29 @@ struct Manga_readerApp: App {
 }
 
 // --- Context actions published by whichever view is focused ---
-struct ReaderActions {
+// `token` is stable for the lifetime of the publishing view (e.g. the volume
+// path). Equality compares only the token so that re-rendering the view — which
+// happens on every page turn — does NOT republish the value and force the
+// menu-bar commands to rebuild. The closures read live @State, so an older
+// instance still performs the action against current state.
+struct ReaderActions: Equatable {
+    var token: String
     var gallery: () -> Void
     var bookmark: () -> Void
     var bookmarksPanel: () -> Void
     var offset: () -> Void
     var favorite: () -> Void
     var markRead: () -> Void
+    static func == (l: ReaderActions, r: ReaderActions) -> Bool { l.token == r.token }
 }
 
-struct LibraryActions {
+struct LibraryActions: Equatable {
+    var token: String
     var open: () -> Void
     var favorite: () -> Void
     var markRead: () -> Void
     var delete: () -> Void
+    static func == (l: LibraryActions, r: LibraryActions) -> Bool { l.token == r.token }
 }
 
 extension FocusedValues {

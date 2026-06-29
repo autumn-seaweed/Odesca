@@ -190,6 +190,7 @@ struct MangaGrid: View {
         .focusable()
         .focusEffectDisabled()
         .focusedValue(\.libraryActions, LibraryActions(
+            token: "library-grid",
             open: { if let id = selectedIds.first { openManga(id: id) } },
             favorite: {
                 let targets = library.filter { selectedIds.contains($0.persistentModelID) }

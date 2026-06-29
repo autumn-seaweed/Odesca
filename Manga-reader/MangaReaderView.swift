@@ -293,6 +293,7 @@ struct MangaReaderView: View {
         .focused($isFocused)
         .focusEffectDisabled()
         .focusedValue(\.readerActions, ReaderActions(
+            token: volumeURL.path,
             gallery: { showGallery.toggle() },
             bookmark: { toggleBookmark(currentIndex) },
             bookmarksPanel: { showBookmarks.toggle() },

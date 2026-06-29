@@ -127,6 +127,7 @@ struct SeriesDetailView: View {
         .focusable()
         .focusEffectDisabled()
         .focusedValue(\.libraryActions, LibraryActions(
+            token: displayFolder.path,
             open: { if let first = selectedVolumes.first { openVolume(first) } },
             favorite: { manga.isFavorite.toggle() },
             markRead: {
