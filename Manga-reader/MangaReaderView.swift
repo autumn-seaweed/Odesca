@@ -11,6 +11,7 @@ import AppKit
 import ImageIO
 import IOSurface
 import Combine
+import SwiftData
 
 // Page orientation (wide vs tall) keyed by path — populated during decode so the
 // two-page layout never has to read image headers on the main thread.
@@ -344,16 +345,24 @@ struct MangaReaderView: View {
             controller.rightToLeft = readingDirection == .rightToLeft
             controller.coverOffset = useCoverOffset
             controller.bookmarks = Set(bookmarkedPages)
-            controller.onSettle = { page in persistProgress(page: page) } // debounced: never write to SwiftData mid-flip
             let pages = loadPages()
             controller.open(pages, at: restoreProgress(pageCount: pages.count))
             isFocused = true
-            manga.lastReadDate = Date()
         }
         .onDisappear {
             controller.close()
             persistProgress(page: controller.index) // Flush the final position
             ReaderCache.shared.removeAllObjects()   // Clear RAM when leaving
+        }
+        // Any write to the series refreshes the library queries, and the grid behind
+        // the reader rebuilds for a second or more on the main thread. So progress is
+        // only written when reading stops: leaving the reader, switching apps, or quitting.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willResignActiveNotification)) { _ in
+            persistProgress(page: controller.index)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            persistProgress(page: controller.index)
+            try? manga.modelContext?.save()
         }
         .onChange(of: isTwoPageMode) { _, v in controller.isTwoPage = v }
         .onChange(of: readingDirection) { _, v in controller.rightToLeft = v == .rightToLeft }
@@ -545,14 +554,11 @@ final class ReaderController {
     var bookmarks: Set<Int> = [] { didSet { renderStatus() } }
 
     let position = ReaderPosition()
-    /// Called with the page the reader settles on, after a pause in flipping.
-    var onSettle: ((Int) -> Void)?
 
     private weak var canvas: ReaderCanvasView?
     private var shown: Set<URL> = []   // pages in the current spread
     private var prefetchTask: Task<Void, Never>? = nil
     private var warmTask: Task<Void, Never>? = nil
-    private var settleTask: Task<Void, Never>? = nil
 
     func attach(_ canvas: ReaderCanvasView) {
         self.canvas = canvas
@@ -571,8 +577,6 @@ final class ReaderController {
     func close() {
         prefetchTask?.cancel()
         warmTask?.cancel()
-        settleTask?.cancel()
-        onSettle = nil
     }
 
     // --- NAVIGATION ---
@@ -603,7 +607,6 @@ final class ReaderController {
         CATransaction.flush() // commit now rather than at the end of the run loop: the page appears a frame sooner
         position.index = i
         prefetchWindow()
-        scheduleSettle()
     }
 
     // --- LAYOUT ---
@@ -740,18 +743,6 @@ final class ReaderController {
                 for _ in 0..<limit { addNext() }
                 while await group.next() != nil { if Task.isCancelled { break }; addNext() }
             }
-        }
-    }
-
-    /// Debounce model writes so rapid page turns don't each trigger a SwiftData
-    /// mutation (which would refresh library queries mid-flip). Only the page you
-    /// land on — after a brief pause — gets persisted.
-    private func scheduleSettle() {
-        settleTask?.cancel()
-        settleTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(1))
-            guard !Task.isCancelled, let self else { return }
-            self.onSettle?(self.index)
         }
     }
 }
