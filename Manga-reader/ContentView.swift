@@ -8,6 +8,13 @@
 import SwiftUI
 import SwiftData
 
+// Sidebar selection. A distinct `.all` case (instead of nil) so "All Libraries"
+// is a real, selectable row — nil is reserved by List for "no selection".
+enum LibrarySelection: Hashable {
+    case all
+    case library(UUID)
+}
+
 struct ContentView: View {
     @Environment(\.modelContext) var modelContext
     @StateObject private var scanner = LibraryScanner()
@@ -16,7 +23,12 @@ struct ContentView: View {
     @State private var sortOrder = SortDescriptor(\MangaSeries.dateModified, order: .reverse)
     @State private var searchText = ""
     @State private var currentFilter: LibraryFilter = .all
-    @State private var selectedLibraryID: UUID? = nil
+    @State private var selection: LibrarySelection? = .all
+
+    private var selectedLibraryID: UUID? {
+        if case .library(let id) = selection { return id }
+        return nil
+    }
 
     @Query(sort: \Library.dateAdded) private var libraries: [Library]
 
@@ -26,16 +38,16 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView {
             // --- LIBRARY SIDEBAR ---
-            List(selection: $selectedLibraryID) {
-                Label("All Libraries", systemImage: "books.vertical").tag(UUID?.none)
+            List(selection: $selection) {
+                Label("All Libraries", systemImage: "books.vertical").tag(LibrarySelection.all)
 
                 Section("Libraries") {
                     ForEach(libraries) { lib in
                         Label(lib.name, systemImage: "folder")
-                            .tag(Optional(lib.id))
+                            .tag(LibrarySelection.library(lib.id))
                             .contextMenu {
                                 Button(role: .destructive) {
-                                    if selectedLibraryID == lib.id { selectedLibraryID = nil }
+                                    if selection == .library(lib.id) { selection = .all }
                                     scanner.removeLibrary(lib, context: modelContext)
                                 } label: { Label("Remove Library", systemImage: "trash") }
                             }
@@ -82,8 +94,12 @@ struct ContentView: View {
                     }
                     .background(.ultraThinMaterial)
 
-                    let recents = recentlyReadManga.filter { $0.lastReadDate > Date.distantPast }
-                    let showRecents = searchText.isEmpty && currentFilter == .all && selectedLibraryID == nil
+                    // Recently read for the current scope (a specific library, or all).
+                    let recents = recentlyReadManga.filter {
+                        $0.lastReadDate > Date.distantPast &&
+                        (selectedLibraryID == nil || $0.libraryID == selectedLibraryID)
+                    }
+                    let showRecents = searchText.isEmpty && currentFilter == .all
 
                     MangaGrid(
                         sort: sortOrder,
